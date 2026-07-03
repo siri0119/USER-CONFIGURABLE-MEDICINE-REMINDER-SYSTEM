@@ -50,7 +50,7 @@ When the scheduled medicine time occurs, the system:
 
 <p align="center">
 
-![Medicine Reminder System Architecture](system_architecture.png)
+![Project Screenshot](system_architecture.png)
 
 </p>
 
