@@ -50,7 +50,7 @@ When the scheduled medicine time occurs, the system:
 
 <p align="center">
 
-![Project Screenshot](system_architecture.png)
+![gallery](system_architecture.png)
 </p>
 
 ---
