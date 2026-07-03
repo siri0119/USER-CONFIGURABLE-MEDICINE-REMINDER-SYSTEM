@@ -74,17 +74,16 @@ When the scheduled medicine time occurs, the system:
 
 <p align="center">
 
-![Medicine Reminder Block Diagram](block.png)
+<img src="gallery/block.png" width="100%">
 
 </p>
-
 ---
 
 # ⚙️ System Working Flow
 
 <p align="center">
 
-![Medicine Reminder Working Flow](working_flow.png)
+<img src="gallery/working_flow.png" width="100%">
 
 </p>
 
@@ -111,7 +110,7 @@ The required option is selected using the **4x4 Matrix Keypad**.
 
 <p align="center">
 
-![System Configuration Flow](configuration.png)
+<img src="gallery/configuration.png" width="100%">
 
 </p>
 
@@ -123,7 +122,7 @@ The RTC configuration feature allows the user to modify the current system date 
 
 <p align="center">
 
-![RTC Configuration Flow](rtc.png)
+<img src="gallery/rtc.png" width="100%">
 
 </p>
 
@@ -159,7 +158,7 @@ The user can configure one or more medicine timings using the **Matrix Keypad**.
 
 <p align="center">
 
-![Medicine Schedule Configuration](medicine_config.png)
+<img src="gallery/medicine_config.png" width="100%">
 
 </p>
 
@@ -199,7 +198,7 @@ In this mode:
 
 <p align="center">
 
-![Clock Only Mode](clock_mode.png)
+<img src="gallery/clock_mode.png" width="100%">
 
 </p>
 
@@ -244,13 +243,11 @@ When the RTC time matches a stored medicine schedule:
 - Buzzer starts periodic **ON/OFF Alert**
 - Acknowledgment Timer starts
 - System waits for User Confirmation
-
 <p align="center">
 
-![Medicine Alert Flow](alert.png)
+<img src="gallery/alert.png" width="100%">
 
 </p>
-
 ---
 
 # 🔘 User Acknowledgment using EINT1
@@ -315,7 +312,7 @@ If the user does **not acknowledge within one minute**:
 
 <p align="center">
 
-![Complete Software Flowchart](software_flow.png)
+<img src="gallery/software_flow.png" width="100%">
 
 </p>
 
