@@ -442,10 +442,24 @@ The Medicine Reminder System operates in three major modes:
 
 <p align="center">
 
-![Project Screenshot](1.jpeg) | ![Project Screenshot](2.jpeg) | ![Project Screenshot](3.jpeg)
+<img src="gallery/1.png" width="95%" alt="Medicine Reminder System Proteus Simulation">
+
+<br><br>
+
+<img src="gallery/2.png" width="45%" alt="RTC and Medicine Configuration Menu">
+<img src="gallery/3.png" width="45%" alt="RTC Time Edit Menu">
+
+<br><br>
+
+<img src="gallery/4.png" width="45%" alt="RTC Day Configuration">
+<img src="gallery/5.png" width="45%" alt="Medicine Schedule Configuration">
+
+<br><br>
+
+<img src="gallery/6.png" width="45%" alt="Medicine Time Configuration">
+<img src="gallery/7.png" width="45%" alt="Take Medicine Alert">
 
 </p>
-
 ---
 
 # 💻 Software Used
