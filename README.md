@@ -50,9 +50,9 @@ When the scheduled medicine time occurs, the system:
 
 <p align="center">
 
-![gallery](system_architecture.png)
-</p>
+<img src="gallery/system_architecture.png" width="100%">
 
+</p>
 ---
 
 # 🧩 Hardware Components
