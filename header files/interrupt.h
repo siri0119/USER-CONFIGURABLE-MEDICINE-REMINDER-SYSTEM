@@ -1,16 +1,12 @@
-// Include LPC21xx header file
 #include<lpc21xx.h>
 
-// Include RTC header file
 #include "rtc.h"
-
 
 // EINT0 input pin
 #define EINT0_INPUT_PIN 0x0000000C
 
 // EINT0 VIC channel number
 #define EINT0_VIC_CHN0 14
-
 
 // EINT1 input pin
 #define EINT1_INPUT_PIN 0x000000C0
