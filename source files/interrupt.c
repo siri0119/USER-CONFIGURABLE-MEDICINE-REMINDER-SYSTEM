@@ -3,1068 +3,1077 @@
 // DESCRIPTION: Handles hardware interrupts, RTC/Medicine configurations, and UI logic
 // ==================================================================================
 
-#include "interrupt.h"        // Include custom definitions and function prototypes for interrupt operations
-#include <lpc21xx.h>          // Include core register definition header for NXP LPC21xx Microcontrollers
-#include "lcd_defines.h"      // Include hardware command configurations and memory mappings for the LCD
-#include "LCD.h"              // Include high-level character, string, and control function prototypes for LCD
-#include "rtc.h"              // Include peripheral driver prototypes for the internal Real-Time Clock
-#include "KPM.h"              // Include driver prototypes for Keypad Matrix input scanning operations
+#include "interrupt.h"        // Interrupt header file
+#include <lpc21xx.h>          // LPC21xx register definitions
+#include "lcd_defines.h"      // LCD definitions
+#include "LCD.h"              // LCD functions
+#include "rtc.h"              // RTC functions
+#include "KPM.h"              // Keypad functions
 
-unsigned int year_val;        // Define a global numerical storage variable to hold and validate calculated 4-digit years
-char dayLUT[][4] = {"SUN","MON","TUE","WED","THU","FRI","SAT"}; // Define a 2D look-up table array mapping day indices to 3-letter strings
-unsigned int cnt;             // Declare a global auxiliary integer counter variable for general usage
-extern int day, last_triggered_minute; // Reference external integer variables tracking current day index and alarm block markers
-int i, temp;                  // Declare local context variables used in iterative loops and transient data caching
-extern int flag, flag1, flag3, flag4; // Link to external control status flags managed concurrently by main loop loops
-extern char key, m1[], m2[], m3[], time[], date[]; // Pull external string buffers for inputs, reminders, time text, and dates
+unsigned int year_val;        // Stores year value
+char dayLUT[][4] = {"SUN","MON","TUE","WED","THU","FRI","SAT"}; // Stores day names
+unsigned int cnt;             // Global counter variable
+extern int day, last_triggered_minute; // External day and last triggered minute variables
+int i, temp;                  // Variables used for loop and temporary value
+extern int flag, flag1, flag3, flag4; // External flag variables
+extern char key, m1[], m2[], m3[], time[], date[]; // External key, medicine, time and date variables
 
-extern int alert_timer;       // Import an external active dynamic countdown variable tracking buzzer alarm runtime
+extern int alert_timer;       // External alert timer variable
 
-int check(char* p, char* q)   // Define a comparison routing to match active time strings against target alarm limits
+int check(char* p, char* q)   // Compares two time strings
 {
-	int i = 0;                  // Initialize a local iteration offset pointer starting at index zero
-	while(i < 5)                // Loop exactly 5 iterations to check hours and minutes characters ("HH:MM")
+	int i = 0;                  // Start index from 0
+	while(i < 5)                // Check first 5 time characters
 	{
-		if(p[i] != q[i])          // Inspect structural equality between character elements at the matching offsets
-			return 0;               // Immediately drop out and report a zero integer status if elements mismatch
-		i++;                      // Increment the step index pointer to evaluate the following character array index
+		if(p[i] != q[i])          // Check both characters
+			return 0;               // Return 0 if characters do not match
+		i++;                      // Move to next character
 	}
-	return 1;                   // Return success code value one confirming that all monitored values align perfectly
+	return 1;                   // Return 1 if all characters match
 }
 
-void Init_intrrupt(void)      // Construct a peripheral initialization block to establish interrupt routing properties
+void Init_intrrupt(void)      // Initialize interrupts
 {
-	// cfg p0.1,p0.3 pin as EINT0,EINT1
-	// input pins
-	// clr bit pair 2&3 & bit pair 4&5,
-	// w/o affecting other bits
-	PINSEL0 &= ((u32)~3 << 2) | ((u32)~3 << 4); // Clear functional selections for Pin 0.1 and Pin 0.3 via bitmasks
-	// update bit2&3,bit4&5 for EINT0,EINT1
-	// pin function
-	PINSEL0 |= EINT0_INPUT_PIN | EINT1_INPUT_PIN; // Direct Pin 0.1 and Pin 0.3 routing registers to connect to EINT0 and EINT1 lines
+	// Configure P0.1 and P0.3 as EINT0 and EINT1
+	// Input pins
+	// Clear bit pairs without affecting other bits
+	PINSEL0 &= ((u32)~3 << 2) | ((u32)~3 << 4); // Clear pin function bits
 	
-	// cfg VIC peripheral/block
-	// allow EINT0,EINT1 as irq type
-	// VICIntSelect=0; // default
-	// enable EINT0,EINT1 through channel
-	VICIntEnable = 1 << EINT0_VIC_CHN0 | 1 << EINT1_VIC_CHN0; // Set explicit bits in the Vector Interrupt Controller to unmask external lines
+	// Select EINT0 and EINT1 pin functions
+	PINSEL0 |= EINT0_INPUT_PIN | EINT1_INPUT_PIN;
 	
-	// Cfg EINT0 as v.irq with highest priority(0)
-	VICVectCntl1 = (1 << 5) | EINT0_VIC_CHN0; // Bind channel 14 to Slot 1 while flipping hardware bit-5 to confirm slot activation
-	// load eint0_isr address into LUT sfr
-	VICVectAddr1 = (u32)eint0_isr; // Load the exact execution address of the EINT0 ISR routine into vector slot 1
+	// Configure VIC
+	// Enable EINT0 and EINT1 channels
+	VICIntEnable = 1 << EINT0_VIC_CHN0 | 1 << EINT1_VIC_CHN0;
+	
+	// Configure EINT0 as vectored IRQ
+	VICVectCntl1 = (1 << 5) | EINT0_VIC_CHN0;
+	
+	// Store EINT0 ISR address
+	VICVectAddr1 = (u32)eint0_isr;
 
-	// Cfg EINT1 as v.irq with next
-	// highest priority(1)
-	VICVectCntl0 = (1 << 5) | EINT1_VIC_CHN0; // Bind channel 15 to Slot 0 while flipping hardware bit-5 to confirm slot activation
-	// load eint1_isr address into LUT sfr
-	VICVectAddr0 = (u32)eint1_isr; // Load the exact execution address of the EINT1 ISR routine into vector slot 0
-
-	// Cfg EINT0,EINT1 via 
-	// External Interrupts Peripheral	
-	// Enable EINT0,EINT1
-	// EXTINT=0;// default
-	// Cfg EINT0,EINT1 as edge triggered interrupt
-	EXTMODE = ((1 << 1) | (1 << 0)); // Configure External Interrupt Mode register to treat both paths as edge-sensitive switches
-	// cfg EINT0,EINT1 as falling edge triggered
-	// EXTPOLAR=0;// default
+	// Configure EINT1 as vectored IRQ
+	VICVectCntl0 = (1 << 5) | EINT1_VIC_CHN0;
 	
-	// cfg status led pin for EINT0,EINT1
-	// as gpio out
+	// Store EINT1 ISR address
+	VICVectAddr0 = (u32)eint1_isr;
+
+	// Configure EINT0 and EINT1
+	// Set as edge triggered interrupts
+	EXTMODE = ((1 << 1) | (1 << 0));
+	
+	// EINT0 and EINT1 are falling edge triggered
 }
 
-void eint0_isr(void) __irq   // Implement the Vector Interrupt Service routine invoked when External Pin EINT0 triggers
+void eint0_isr(void) __irq   // EINT0 interrupt service routine
 {
-	// clear EINT0 Status in Ext Int Peripheral
-	EXTINT = 1 << 0;            // Write a high bit to clear the latch tracking external hardware channel 0 status
-	// clear EINT0 status in VIC peripheral
-	VICVectAddr = 0;            // Write a clearing dummy zero to VIC register to signal endpoint sequence to prioritizing hardware
-	if(((IOPIN0 >> BUZZER) & 1) == 0) // Query GPIO pin status state to check if the buzzer line is low
+	// Clear EINT0 interrupt status
+	EXTINT = 1 << 0;
+	
+	// Clear VIC interrupt status
+	VICVectAddr = 0;
+	
+	if(((IOPIN0 >> BUZZER) & 1) == 0) // Check if buzzer is OFF
 	{
-		flag = 1;                 // Assert configuration request flag state to pull application state away into user menus
-		IOCLR0 = 1 << 1;          // Issue a low logic write command to Port 0 bit line 1
+		flag = 1;                 // Set configuration flag
+		IOCLR0 = 1 << 1;          // Clear P0.1
 	}
 }
 
-void eint1_isr(void) __irq   // Implement the Vector Interrupt Service routine invoked when External Pin EINT1 triggers
+void eint1_isr(void) __irq   // EINT1 interrupt service routine
 {
-	EXTINT = 1 << 1;            // Clear the latch tracking external hardware channel 1 status flags
-	VICVectAddr = 0;            // Clear the interrupt block tracking logic state within the hardware prioritizing module
-	if(((IOPIN0 >> BUZZER) & 1) == 1) // Inspect line status register to check if the audio buzzer output is active
+	EXTINT = 1 << 1;            // Clear EINT1 interrupt status
+	VICVectAddr = 0;            // Clear VIC interrupt status
+	
+	if(((IOPIN0 >> BUZZER) & 1) == 1) // Check if buzzer is ON
 	{
-		IOCLR0 = 1 << BUZZER;     // Drive the target audio output pin to a low state to immediately suppress the alarm buzzer
-		alert_timer = 0;          // Clear the duration counter tracker to drop the alert window tracking process
+		IOCLR0 = 1 << BUZZER;     // Turn OFF buzzer
+		alert_timer = 0;          // Reset alert timer
 		
-		CmdLCD(CLR);              // Issue clear operation matrix byte across the transmission lines to empty display memory
-		StrLCD((signed char*)"Medicine Taken"); // Render a success validation line layout to the character view matrix panel
-		delay_ms(1000);           // Enter an execution stall period spanning one full second to keep the visual message visible
-		CmdLCD(CLR);              // Blank display text fields again to return system layout view templates to normal states
-		flag4 = 1;                // Set interface transition flag to prompt baseline loop tracking updates
-		flag3 = 0;                // Turn off active trigger permissions until conditions clear out elsewhere
-		last_triggered_minute = -1; // Reset active tracking history back to an index safely outside normal real clock ranges
+		CmdLCD(CLR);              // Clear LCD
+		StrLCD((signed char*)"Medicine Taken"); // Display medicine taken message
+		delay_ms(1000);           // Wait for 1 second
+		CmdLCD(CLR);              // Clear LCD
+		
+		flag4 = 1;                // Set flag4
+		flag3 = 0;                // Clear flag3
+		last_triggered_minute = -1; // Reset last triggered minute
 	}
-	else if(flag1 == 1)         // Alternate path check to evaluate if configuration state modes are already active
+	else if(flag1 == 1)         // Check configuration mode
 	{
 		// Do nothing if already in configuration menu
 	}
-	else                        // Fallback block executing when the user impacts the switch with no alerts running
+	else
 	{
-		CmdLCD(CLR);              // Execute clear matrix instruction to sweep character fields clean from panel layout
-		StrLCD((signed char*)"No Remindiers"); // Render alert message indicating lack of running time matches
-		delay_ms(1000);           // Hold operations frozen for a span of one thousand milliseconds for read visibility
-		CmdLCD(CLR);              // Clear display characters away to cleanly format screen space for clock update cycles
+		CmdLCD(CLR);              // Clear LCD
+		StrLCD((signed char*)"No Remindiers"); // Display no reminders message
+		delay_ms(1000);           // Wait for 1 second
+		CmdLCD(CLR);              // Clear LCD
 	}
 }
 
-void menu2(void)                // Construct secondary application menu interface loop handling individual RTC adjustments
+void menu2(void)                // RTC edit menu
 {
-	while(1)                    // Initialize a persistent user input polling loop blocking external main routines
+	while(1)                    // Repeat menu until exit
 	{
-		CmdLCD(CLR);              // Wipe character contents off display rows to draw updated structural elements
-		CmdLCD(GOTO_L1_POSN0);    // Relocate standard graphic layout text drawing pointer address to Start of Row 1
-		StrLCD((signed char*)"1.RTC Time 2.Dy"); // Print primary system options on the current LCD line
-		CmdLCD(GOTO_L2_POSN0);    // Relocate standard graphic layout text drawing pointer address to Start of Row 2
-		StrLCD((signed char*)"3.RTC Date 4.Q"); // Print secondary system options on the current LCD line
-		key = KeyScan();          // Execute keypad scanning block to track physical keyboard choices made by user
+		CmdLCD(CLR);              // Clear LCD
+		CmdLCD(GOTO_L1_POSN0);    // Move cursor to first line
+		StrLCD((signed char*)"1.RTC Time 2.Dy"); // Display first menu line
+		CmdLCD(GOTO_L2_POSN0);    // Move cursor to second line
+		StrLCD((signed char*)"3.RTC Date 4.Q"); // Display second menu line
 		
-		switch(key)               // Evaluate returned matrix dynamic parameter value to navigate execution routing pathways
+		key = KeyScan();          // Read key from keypad
+		
+		switch(key)               // Check selected key
 		{
-			case '1':               // Selection branch intended to facilitate adjusting active time string contents
-				while(1)            // Begin sub-loop layer managing explicit segment adjustments for Hours, Minutes, and Seconds
+			case '1':             // RTC time editing
+				while(1)
 				{
-					CmdLCD(CLR);      // Purge active liquid crystal rendering cells of residual string characters
-					CmdLCD(GOTO_L1_POSN0); // Command the cursor position hardware to return to the origin index of Row 1
-					StrLCD((signed char*)time); // Cast and write the active time structural representation formatting string
-					CmdLCD(GOTO_L1_POSN0 + 11); // Offset internal rendering tracking position rightward by eleven steps
-					StrLCD((signed char*)"4.exit"); // Write out boundary interface escape text menu item choice label
-					CmdLCD(GOTO_L2_POSN0); // Move cursor down line tracking coordinates to point directly to Row 2 base
-					StrLCD((signed char*)"1.hr 2.min 3.sec"); // Write segment modification options text layouts across display width
-					key = KeyScan();  // Scan keyboard array interface again to read unit element selection index
-					switch(key)       // Direct internal flow execution configurations down chosen unit segment adjust paths
+					CmdLCD(CLR);      // Clear LCD
+					CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+					StrLCD((signed char*)time); // Display current time
+					CmdLCD(GOTO_L1_POSN0 + 11); // Move cursor position
+					StrLCD((signed char*)"4.exit"); // Display exit option
+					CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+					StrLCD((signed char*)"1.hr 2.min 3.sec"); // Display time edit options
+					
+					key = KeyScan();  // Read key from keypad
+					
+					switch(key)
 					{
-						// hour
-						case '1':       // Branch segment assigned explicitly for modifying active Clock Hours tracking data
-							flag3 = 1;    // Enable validation synchronization status flag tracker markers
-						g: CmdLCD(CLR);  // Destination marker layout reference handling text recovery routines upon error states
-							CmdLCD(GOTO_L1_POSN0); // Force text layout reference pointer location to Row 1 Start
-							StrLCD((signed char*)time); // Paint the operational layout structural layout framework array string
-							CmdLCD(GOTO_L1_POSN0); // Force focus orientation pointer index layout precisely back to character 0
-							time[0] = KeyScan(); // Block task tracking loops until keypad returns a value to place at offset zero
-							CharLCD(time[0]); // Echo user keyboard entry value directly down communication pathways into hardware views
-							if(time[0] == 'C') // Verify if the operator tapped the dedicated matrix drop clear boundary option
+						// Hour setting
+						case '1':
+							flag3 = 1;    // Set flag3
+							
+						g: CmdLCD(CLR);  // Clear LCD
+							CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+							StrLCD((signed char*)time); // Display current time
+							CmdLCD(GOTO_L1_POSN0); // Move cursor to hour position
+							
+							time[0] = KeyScan(); // Read first hour digit
+							CharLCD(time[0]); // Display entered digit
+							
+							if(time[0] == 'C') // Check clear key
 							{
-								time[0] = '0'; // Overwrite targeted cell coordinate value back into fallback character state
-								goto g;     // Re-route operational loop track sequence backward up to label g
+								time[0] = '0'; // Reset first hour digit
+								goto g;         // Enter hour again
 							}
-							else if(time[0] >= '0' && time[0] <= '2') // Validate that hours first numeric index fits limits
+							else if(time[0] >= '0' && time[0] <= '2') // Check first hour digit
 							{
-							h2: CmdLCD(CLR); // Frame baseline interface screen space layout grid structure arrays afresh
-								CmdLCD(GOTO_L1_POSN0); // Snap alignment cursor state back up onto row index level boundary
-								StrLCD((signed char*)time); // Print context text format view containing new adjustments
-								CmdLCD(GOTO_L1_POSN0 + 1); // Move target point rightward to highlight unit digit coordinate field
-								time[1] = KeyScan(); // Block for single-character digit key matrix selection to insert at offset 1
-								if(time[1] == 'C') // Verify if the correction action override code character was flagged
+							h2: CmdLCD(CLR); // Clear LCD
+								CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+								StrLCD((signed char*)time); // Display current time
+								CmdLCD(GOTO_L1_POSN0 + 1); // Move cursor to second hour digit
+								
+								time[1] = KeyScan(); // Read second hour digit
+								
+								if(time[1] == 'C') // Check clear key
 								{
-									time[0] = '0'; // Clear out hours first location data cells back to structural zero
-									time[1] = '0'; // Clear out hours second location data cells back to structural zero
-									goto g; // Loop system execution pointers backward back up onto primary element label entry
+									time[0] = '0'; // Reset first hour digit
+									time[1] = '0'; // Reset second hour digit
+									goto g;         // Enter hour again
 								}
 								else if(((time[0] >= '0' && time[0] <= '1') && (time[1] >= '0' && time[1] <= '9'))
-									|| (time[0] == '2' && (time[1] >= '0') && (time[1] <= '3'))) // Check for valid hours boundaries (00-23)
+									|| (time[0] == '2' && (time[1] >= '0') && (time[1] <= '3'))) // Check valid hour
 								{
-									CharLCD(time[1]); // Render valid chosen symbol entry directly into display view line locations
-									// Set the initial time (hours, minutes, seconds)
-									SetRTCTimeInfo(time); // Push fully updated system string structure directly into local RTC hardware
+									CharLCD(time[1]); // Display second hour digit
+									
+									// Set RTC time
+									SetRTCTimeInfo(time);
 								}
-								else        // Execution node taking action if parameters violate formal hours time scales
+								else
 								{
-									time[1] = '0'; // Clear out faulty element state value cells back to reliable baseline zero
-									CmdLCD(CLR); // Clear structural layouts off terminal face interface cells
-									CmdLCD(GOTO_L1_POSN0); // Recenter operational display coordinate maps to Top Left position
-									StrLCD((signed char*)"Invalid Hour"); // Notify user that inputted hour range falls outside standards
-									CmdLCD(GOTO_L2_POSN0); // Shift focus indicator line markers down context layer structures
-									StrLCD((signed char*)"Try Again"); // Direct user action patterns through standard retry strings
-									delay_ms(100); // Stall configuration routine activity cycles momentarily
-									goto h2; // Return routine track execution steps back to internal digit recovery label
+									time[1] = '0'; // Reset second hour digit
+									CmdLCD(CLR); // Clear LCD
+									CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+									StrLCD((signed char*)"Invalid Hour"); // Display invalid hour
+									CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+									StrLCD((signed char*)"Try Again"); // Display try again
+									delay_ms(100); // Wait
+									goto h2; // Enter second hour digit again
 								}
 							}
-							else          // Fallback tracking block triggered when the initial hour character fails tests
+							else
 							{
-								time[0] = '0'; // Revert top layer cell index mapping back to clean base character
-								CmdLCD(CLR); // Clear active viewing screen cells to handle error updates cleanly
-								CmdLCD(GOTO_L1_POSN0); // Re-establish graphic printing bounds parameters at origin marker points
-								StrLCD((signed char*)"Invalid Hour"); // Display notice stating primary data choices failed validation bounds
-								CmdLCD(GOTO_L2_POSN0); // Drop graphic cursor focus paths down to next character track lines
-								StrLCD((signed char*)"Try Again"); // Present operational retry text blocks back to user view spaces
-								delay_ms(100); // Stall dynamic calculation execution tracks briefly for sensory visibility
-								goto g;     // Branch control flow tracks directly back to target marker label g
-							}	
-							break;        // Break outward from hour case routine paths back into time branch level
+								time[0] = '0'; // Reset first hour digit
+								CmdLCD(CLR); // Clear LCD
+								CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+								StrLCD((signed char*)"Invalid Hour"); // Display invalid hour
+								CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+								StrLCD((signed char*)"Try Again"); // Display try again
+								delay_ms(100); // Wait
+								goto g; // Enter hour again
+							}
+							break;
 						
-						// minute
-						case '2':       // Branch segment assigned explicitly for modifying active Clock Minutes tracking data
-							flag3 = 1;    // Enforce data confirmation checking guidelines parameters onto configurations
-						h: CmdLCD(CLR);  // Reset display screen elements by pushing a clear message down to registers
-							CmdLCD(GOTO_L1_POSN0); // Establish target display field alignment coordinates back to Row 1 start
-							StrLCD((signed char*)time); // Display time variable data structures across the character pane surface
-							CmdLCD(GOTO_L1_POSN0 + 3); // Advance focus alignment forward across the text array onto tens minute index
-							time[3] = KeyScan(); // Capture target matrix index value selection to record at offset three
-							CharLCD(time[3]); // Display standard numeric symbol mapping character values down to LCD grids
-							if(time[3] == 'C') // Test array strings to determine if an abort command request was given
+						// Minute setting
+						case '2':
+							flag3 = 1;    // Set flag3
+							
+						h: CmdLCD(CLR);  // Clear LCD
+							CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+							StrLCD((signed char*)time); // Display current time
+							CmdLCD(GOTO_L1_POSN0 + 3); // Move cursor to minute position
+							
+							time[3] = KeyScan(); // Read first minute digit
+							CharLCD(time[3]); // Display entered digit
+							
+							if(time[3] == 'C') // Check clear key
 							{
-								time[3] = '0'; // Revert target element memory register states back to base character zero
-								goto h;     // Re-route processing logic flow tracks backward onto loop entry label h
+								time[3] = '0'; // Reset first minute digit
+								goto h;         // Enter minute again
 							}
-							else if(time[3] >= '0' && time[3] <= '5') // Verify the tens character fits standard hexagesimal scales (0-5)
+							else if(time[3] >= '0' && time[3] <= '5') // Check first minute digit
 							{
-							min: CmdLCD(CLR); // Clean the active system displaying elements framework back to base states
-								CmdLCD(GOTO_L1_POSN0); // Relocate textual view cursor alignment locations back to the row origin
-								StrLCD((signed char*)time); // Reprint the underlying time layout contents to dynamic panel fields
-								CmdLCD(GOTO_L1_POSN0 + 4); // Step cursor forward four blocks to target structural unit minute position
-								time[4] = KeyScan(); // Read explicit key element assignment data mapping directly into offset four
-								if(time[4] == 'C') // Evaluate if user intends to fall back and purge local parameters
+							min: CmdLCD(CLR); // Clear LCD
+								CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+								StrLCD((signed char*)time); // Display current time
+								CmdLCD(GOTO_L1_POSN0 + 4); // Move cursor to second minute digit
+								
+								time[4] = KeyScan(); // Read second minute digit
+								
+								if(time[4] == 'C') // Check clear key
 								{
-									time[3] = '0'; // Restore context column tracking index data values back to baseline
-									time[4] = '0'; // Clear out unit slot structure fields back to structural baseline
-									goto h; // Re-align loop pointers back to primary branch parameter label markers
+									time[3] = '0'; // Reset first minute digit
+									time[4] = '0'; // Reset second minute digit
+									goto h;         // Enter minute again
 								}
-								else if(time[4] >= '0' && time[4] <= '9') // Confirm that unit digit inputs reside cleanly inside numerical values
+								else if(time[4] >= '0' && time[4] <= '9') // Check second minute digit
 								{
-									CharLCD(time[4]); // Draw single character unit digit onto display structure array blocks
-									SetRTCTimeInfo(time); // Update the core RTC register states to match new composite string maps
+									CharLCD(time[4]); // Display second minute digit
+									SetRTCTimeInfo(time); // Set RTC time
 								}
-								else        // Handle error responses if the inputted digit fails numerical ranges
+								else
 								{
-									time[4] = '0'; // Enforce fallback data definitions down onto active parameters cells
-									CmdLCD(CLR); // Refresh displaying interfaces by throwing structural wipe controls down
-									CmdLCD(GOTO_L1_POSN0); // Re-establish text processing locations back up on line entry thresholds
-									StrLCD((signed char*)"Invalid Minute"); // Render confirmation alert string details indicating boundary error
-									CmdLCD(GOTO_L2_POSN0); // Move graphic focus indicators down onto secondary row frameworks
-									StrLCD((signed char*)"Try Again"); // Encourage interactive user retries by populating layout prompts
-									delay_ms(100); // Block operation steps briefly to make data updates visual to eyes
-									goto min; // Loop workflow operations down into local fallback minute logic paths
+									time[4] = '0'; // Reset second minute digit
+									CmdLCD(CLR); // Clear LCD
+									CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+									StrLCD((signed char*)"Invalid Minute"); // Display invalid minute
+									CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+									StrLCD((signed char*)"Try Again"); // Display try again
+									delay_ms(100); // Wait
+									goto min; // Enter second minute digit again
 								}
 							}
-							else          // Triggered when initial minute values exceed maximum timing definitions
+							else
 							{
-								time[3] = '0'; // Set index memory location contents straight back to reliable zero base
-								CmdLCD(CLR); // Flash clear command updates across character displaying module blocks
-								CmdLCD(GOTO_L1_POSN0); // Align tracking focus limits back up with main line text fields
-								StrLCD((signed char*)"Invalid Minute"); // Alert operators concerning incorrect minutes input structural constraints
-								CmdLCD(GOTO_L2_POSN0); // Drop writing coordinates down onto secondary interface layer regions
-								StrLCD((signed char*)"Try Again"); // Present structural user retry options down onto layout grids
-								delay_ms(100); // Hold operational flow tracking suspended across short tracking gaps
-								goto h;     // Loop operational configurations direct to step marker label reference h
+								time[3] = '0'; // Reset first minute digit
+								CmdLCD(CLR); // Clear LCD
+								CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+								StrLCD((signed char*)"Invalid Minute"); // Display invalid minute
+								CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+								StrLCD((signed char*)"Try Again"); // Display try again
+								delay_ms(100); // Wait
+								goto h; // Enter minute again
 							}
-							break;        // Break cleanly out from minute handling cases back into parent structures
-						
+							break;
 						// seconds
-						case '3':       // Branch segment assigned explicitly for modifying active Clock Seconds tracking data
-							flag3 = 1;    // Toggle background state flags to require clock logic updates later
-						n: CmdLCD(CLR);  // Send standard display formatting wipes directly out through signal lines
-							CmdLCD(GOTO_L1_POSN0); // Target row structural start alignments back at standard default offsets
-							StrLCD((signed char*)time); // Render string structures holding baseline clock time text information
-							CmdLCD(GOTO_L1_POSN0 + 6); // Advance cursor coordinates straight onto tens seconds position offset
-							time[6] = KeyScan(); // Process user terminal keystrokes to place directly into index six fields
-							CharLCD(time[6]); // Print out echo character symbols down to visual liquid crystal matrix
-							if(time[6] == 'C') // Inspect control parameters to evaluate if user chose to cancel entry
+						case '3':       // Set RTC seconds
+							flag3 = 1;    // Set flag3
+						n: CmdLCD(CLR);  // Clear LCD
+							CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+							StrLCD((signed char*)time); // Display current time
+							CmdLCD(GOTO_L1_POSN0 + 6); // Move cursor to first second digit
+							time[6] = KeyScan(); // Read first second digit
+							CharLCD(time[6]); // Display entered digit
+							if(time[6] == 'C') // Check clear key
 							{
-								time[6] = '0'; // Re-write structural default data values back inside data cells
-								goto n;     // Re-route program flow sequences backward onto structural step label n
+								time[6] = '0'; // Reset first second digit
+								goto n;     // Enter seconds again
 							}
-							else if(time[6] >= '0' && time[6] <= '5') // Verify tens-of-seconds entry is less than or equal to five
+							else if(time[6] >= '0' && time[6] <= '5') // Check first second digit
 							{
-							sec: CmdLCD(CLR); // Sweep away graphic elements from the active character viewing window
-								CmdLCD(GOTO_L1_POSN0); // Bring baseline text alignment pointers back up onto top line borders
-								StrLCD((signed char*)time); // Render updated operational system time tracking strings out to panel
-								CmdLCD(GOTO_L1_POSN0 + 7); // Shift cursor tracking boundaries directly onto unit seconds text index
-								time[7] = KeyScan(); // Scan matrix elements to pull unit seconds options data down to index 7
-								if(time[7] == 'C') // Test character configurations to evaluate if an abort signal is present
+							sec: CmdLCD(CLR); // Clear LCD
+								CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+								StrLCD((signed char*)time); // Display current time
+								CmdLCD(GOTO_L1_POSN0 + 7); // Move cursor to second digit
+								time[7] = KeyScan(); // Read second digit
+								if(time[7] == 'C') // Check clear key
 								{
-									time[6] = '0'; // Clear tens field data values directly back down into baseline representations
-									time[7] = '0'; // Clear unit field data values directly back down into baseline representations
-									goto n; // Branch control execution tracks back to the primary seconds label baseline
+									time[6] = '0'; // Reset first digit
+									time[7] = '0'; // Reset second digit
+									goto n; // Enter seconds again
 								}
-								else if(time[7] >= '0' && time[7] <= '9') // Enforce valid boundaries for standard seconds inputs (0-9)
+								else if(time[7] >= '0' && time[7] <= '9') // Check valid digit
 								{
-									CharLCD(time[7]); // Render active character layout data items out onto hardware blocks
-									SetRTCTimeInfo(time); // Synchronize operational changes directly with real underlying RTC registers
+									CharLCD(time[7]); // Display second digit
+									SetRTCTimeInfo(time); // Update RTC time
 								}
-								else        // Process unexpected data entries falling outside valid numeric formats
+								else
 								{
-									time[7] = '0'; // Enforce safe baseline default symbols down inside memory matrices
-									CmdLCD(CLR); // Direct display hardware modules to drop current layout structures
-									CmdLCD(GOTO_L1_POSN0); // Move graphic rendering references back up onto baseline boundaries
-									StrLCD((signed char*)"Invalid Second"); // Output contextual notifications describing execution constraint issues
-									CmdLCD(GOTO_L2_POSN0); // Step cursor markers down onto lower text track layers
-									StrLCD((signed char*)"Try Again"); // Prompt interface re-tries by placing system display strings
-									delay_ms(100); // Stall standard computing tracks across short millisecond gaps
-									goto sec; // Force execution loops back down to sub-layer unit tracking labels
+									time[7] = '0'; // Reset second digit
+									CmdLCD(CLR); // Clear LCD
+									CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+									StrLCD((signed char*)"Invalid Second"); // Display invalid second
+									CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+									StrLCD((signed char*)"Try Again"); // Display try again
+									delay_ms(100); // Wait
+									goto sec; // Enter second digit again
 								}
 							}
-							else          // Handle errors when the tens-of-seconds digit choice violates boundaries
+							else
 							{
-								time[6] = '0'; // Drive value fields directly back into safe structural default characters
-								CmdLCD(CLR); // Wipe layout panels clean to allow new error data viewing updates
-								CmdLCD(GOTO_L1_POSN0); // Point display target focus markers to standard origin tracking boundaries
-								StrLCD((signed char*)"Invalid Second"); // Print error warnings stating seconds data choices are out of bounds
-								CmdLCD(GOTO_L2_POSN0); // Drop graphic generation targets down onto lower interface frames
-								StrLCD((signed char*)"Try Again"); // Repopulate dynamic interface paths with structural menu retry terms
-								delay_ms(100); // Wait out short operational gaps to let operators digest warnings
-								goto n;     // Transfer functional workflow paths backward up to step entry label n
+								time[6] = '0'; // Reset first second digit
+								CmdLCD(CLR); // Clear LCD
+								CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+								StrLCD((signed char*)"Invalid Second"); // Display invalid second
+								CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+								StrLCD((signed char*)"Try Again"); // Display try again
+								delay_ms(100); // Wait
+								goto n;     // Enter seconds again
 							}
-							break;        // Break away from active seconds processing routines back to parent layers
-						case '4':       // User exit selection to leave the sub-menu layer
-							break;        // Break out from the active time editing sub-switch execution track
-						default:        // Fallback catch handles any keystrokes that do not match menu parameters
-							CmdLCD(CLR);  // Clear visual panels completely to handle invalid option displays safely
-							CmdLCD(GOTO_L1_POSN0); // Shift printing alignments back to upper-left interface markers
-							StrLCD((signed char*)"Invalid Input"); // Write error line explaining chosen keys are unmapped options
-							CmdLCD(GOTO_L2_POSN0); // Drop focus targets onto bottom display rows to finalize feedback
-							StrLCD((signed char*)"Try Again"); // Render simple operational instruction blocks encouraging re-entry
-							delay_ms(1000); // Hold messaging active across a duration window lasting one full second
-							break;        // Break out from individual timing component select statements cleanly
+							break;        // Exit seconds case
+						case '4':       // Exit time menu
+							break;
+						default:        // Invalid key
+							CmdLCD(CLR);  // Clear LCD
+							CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+							StrLCD((signed char*)"Invalid Input"); // Display invalid input
+							CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+							StrLCD((signed char*)"Try Again"); // Display try again
+							delay_ms(1000); // Wait for 1 second
+							break;
 					}
-					if(key == '4')    // Explicit escape condition check evaluating if exit keys were flagged by users
-						break;          // Break persistent inner time modifications loop loops completely
+					if(key == '4')    // Check exit key
+						break;          // Exit time edit loop
 				}
-				break;              // Escape execution tracks down through standard time configuration loops completely
+				break;
 						
 			// RTC day
-			case '2':               // Switch branch routing configurations to adjust structural day indexes
-				while(1)            // Begin standard loop capture checking day assignment options selections
+			case '2':               // RTC day editing
+				while(1)
 				{
-					CmdLCD(CLR);      // Wipe rendering display slots before rendering new choices menus lists
-					CmdLCD(GOTO_L1_POSN0); // Move graphic focus indicators up onto start row locations
-					StrLCD((signed char*)"0.S 1.M 2.TU 3.W"); // Display map elements pairing numeric inputs to explicit day terms
-					CmdLCD(GOTO_L2_POSN0); // Shift visual target parameters down onto row number two boundaries
-					StrLCD((signed char*)"4.T 5.F 6.SA 7.Q"); // Paint remainder lookup codes choices out onto screen cells
-					key = KeyScan();  // Scan active keyboard components to extract operator day mapping choice
-					if(!(key >= '0' && key <= '7')) // Test inputs to ensure characters remain strictly within option fields
+					CmdLCD(CLR);      // Clear LCD
+					CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+					StrLCD((signed char*)"0.S 1.M 2.TU 3.W"); // Display day options
+					CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+					StrLCD((signed char*)"4.T 5.F 6.SA 7.Q"); // Display remaining day options
+					key = KeyScan();  // Read key from keypad
+					if(!(key >= '0' && key <= '7')) // Check valid day input
 					{
-						CmdLCD(CLR);    // Wipe dynamic hardware panel text layers completely from active configurations
-						CmdLCD(GOTO_L1_POSN0); // Relocate active text drawing points up onto top boundary zones
-						StrLCD((signed char*)"Invalid Day"); // Render warning showing target index maps fall outside definitions
-						CmdLCD(GOTO_L2_POSN0); // Drop structural printing bounds down onto row two coordinate fields
-						StrLCD((signed char*)"Try Again"); // Render contextual instruction guidelines asking for correct inputs
-						delay_ms(100);  // Halt internal application processing paths for basic read windows
+						CmdLCD(CLR);    // Clear LCD
+						CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+						StrLCD((signed char*)"Invalid Day"); // Display invalid day
+						CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+						StrLCD((signed char*)"Try Again"); // Display try again
+						delay_ms(100);  // Wait
 					}
-					else if(key == '7') // Evaluate if the operator entered the dedicated exit sequence option
+					else if(key == '7') // Check exit key
 					{
-						break;          // Terminate standard day processing sub-loops completely via break statements
+						break;          // Exit day menu
 					}
-					else                // Execute data update tasks when keys successfully map within correct scopes
+					else
 					{
-						SetRTCDay((int)key - '0'); // Convert numeric characters to raw integers to commit new days to RTC
-						CmdLCD(CLR);    // Wipe displaying lines clean to showcase transaction success screens
-						CmdLCD(GOTO_L1_POSN0); // Snap visualization pointers back up to top-left matrix nodes
-						StrLCD((signed char*)"Day saved!"); // Display success feedback verifying updates were written to memory
-						delay_ms(500);  // Freeze processing tracks across a brief half-second verification interval
+						SetRTCDay((int)key - '0'); // Set RTC day
+						CmdLCD(CLR);    // Clear LCD
+						CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+						StrLCD((signed char*)"Day saved!"); // Display saved message
+						delay_ms(500);  // Wait
 					}
 				}
-				break;              // Drop execution tracks down from active day modification nodes completely
+				break;
 				
 			// RTC date
-			case '3':               // Branch routing structural execution into calendars date update tracking nodes
-				while(1)            // Initialize persistent user blocking loop to capture numeric date component inputs
+			case '3':               // RTC date editing
+				while(1)
 				{
-					CmdLCD(CLR);      // Execute panel clear operations to refresh standard alpha-numeric outputs
-					CmdLCD(GOTO_L1_POSN0); // Force layout coordinate focus targets up onto line number one margins
-					StrLCD((signed char*)date); // Output active global calendar date formatting strings to screen faces
-					CmdLCD(GOTO_L1_POSN0 + 11); // Push line location targets eleven blocks rightward to frame exit labels
-					StrLCD((signed char*)"4.exit"); // Draw standardized boundaries escape menu option representations
-					CmdLCD(GOTO_L2_POSN0); // Reset character printing focus down onto row level number two markers
-					StrLCD((signed char*)"1.dt 2.mon 3.yr"); // Output structural sub-menu options choices down across screen width
-					key = KeyScan();  // Interrogate key hardware networks to pull current user decisions parameters
-					switch(key)       // Parse active sub-menu inputs to split processing down individual sub-paths
+					CmdLCD(CLR);      // Clear LCD
+					CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+					StrLCD((signed char*)date); // Display current date
+					CmdLCD(GOTO_L1_POSN0 + 11); // Move cursor position
+					StrLCD((signed char*)"4.exit"); // Display exit option
+					CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+					StrLCD((signed char*)"1.dt 2.mon 3.yr"); // Display date edit options
+					key = KeyScan();  // Read key from keypad
+					switch(key)
 					{
 						// date
-						case '1':       // Branch path handling individual month day numeric layout alterations
-						i: CmdLCD(CLR);  // Clear interface lines to track entry sequences accurately without ghosts
-							CmdLCD(GOTO_L1_POSN0); // Re-align structural display focus lines with top line starting zones
-							StrLCD((signed char*)date); // Paint the active calendar date tracking string structures to viewports
-							CmdLCD(GOTO_L1_POSN0); // Bring cursor alignment straight back onto first day digit offset
-							date[0] = KeyScan(); // Block task tracking sequences until keypad returns a first tens digit
-							CharLCD(date[0]); // Write dynamic visual confirmation echo characters directly back to user cells
-							if(date[0] == 'C') // Evaluate if user intends to fall back and drop inputs
+						case '1':       // Set date
+						i: CmdLCD(CLR);  // Clear LCD
+							CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+							StrLCD((signed char*)date); // Display current date
+							CmdLCD(GOTO_L1_POSN0); // Move cursor to date position
+							date[0] = KeyScan(); // Read first date digit
+							CharLCD(date[0]); // Display entered digit
+							if(date[0] == 'C') // Check clear key
 							{
-								date[0] = '0'; // Restore baseline safe placeholders down inside memory targets
-								goto i;     // Force local flow control paths back to top level loop tracker labels
+								date[0] = '0'; // Reset first date digit
+								goto i;     // Enter date again
 							}
-							else if(date[0] >= '0' && date[0] <= '3') // Check that first date digit fits calendar requirements (0-3)
+							else if(date[0] >= '0' && date[0] <= '3') // Check first date digit
 							{
-							date: CmdLCD(CLR); // Refresh system layout visualization windows by flashing matrix clear commands
-								CmdLCD(GOTO_L1_POSN0); // Return printing boundaries targets back onto primary starting positions
-								StrLCD((signed char*)date); // Draw the composite calendar structural values array string back out
-								CmdLCD(GOTO_L1_POSN0 + 1); // Jump text cursor parameters forward to match unit day indices fields
-								date[1] = KeyScan(); // Capture second individual character numeric digit down into index one
-								if(date[1] == 'C') // Test inputs to verify if user triggered system reset adjustments
+							date: CmdLCD(CLR); // Clear LCD
+								CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+								StrLCD((signed char*)date); // Display current date
+								CmdLCD(GOTO_L1_POSN0 + 1); // Move cursor to second date digit
+								date[1] = KeyScan(); // Read second date digit
+								if(date[1] == 'C') // Check clear key
 								{
-									date[0] = '0'; // Reset structural component parameters inside local arrays back to base
-									date[1] = '0'; // Reset structural component parameters inside local arrays back to base
-									goto i; // Return tracking paths backward onto primary date parameter labels lines
+									date[0] = '0'; // Reset first date digit
+									date[1] = '0'; // Reset second date digit
+									goto i; // Enter date again
 								}
 								else if((date[0] == '0' && (date[1] >= '1' && date[1] <= '9'))
 									|| ((date[0] >= '1' && date[0] <= '2') && (date[1] >= '0' && date[1] <= '9'))
-									|| (date[0] == '3' && (date[1] >= '0') && date[1] <= '1')) // Validate standard calendar rules (01-31)
+									|| (date[0] == '3' && (date[1] >= '0') && date[1] <= '1')) // Check valid date
 								{
-									CharLCD(date[1]); // Render valid target character values directly to LCD coordinates
-									SetRTCDateInfo(date); // Push new string configurations straight down to hardware RTC chips
+									CharLCD(date[1]); // Display second date digit
+									SetRTCDateInfo(date); // Update RTC date
 								}
-								else        // Catch layout violations where dates exceed month limits definitions
+								else
 								{
-									date[1] = '0'; // Replace inaccurate value components with safe baseline zero indicators
-									CmdLCD(CLR); // Request absolute matrix clear passes down to hardware screens controllers
-									CmdLCD(GOTO_L1_POSN0); // Focus visualization grids onto top layer alignment nodes
-									StrLCD((signed char*)"Invalid Date"); // Write error text notifying operator concerning broken boundaries parameters
-									CmdLCD(GOTO_L2_POSN0); // Move graphic context indicators onto baseline secondary rows
-									StrLCD((signed char*)"Try Again"); // Print out clear manual restart paths inside option displays
-									delay_ms(100); // Wait out standard time intervals to ensure readability before updates
-									goto date; // Route internal steps back to localized unit error catch points
+									date[1] = '0'; // Reset second date digit
+									CmdLCD(CLR); // Clear LCD
+									CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+									StrLCD((signed char*)"Invalid Date"); // Display invalid date
+									CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+									StrLCD((signed char*)"Try Again"); // Display try again
+									delay_ms(100); // Wait
+									goto date; // Enter second date digit again
 								}
 							}
-							else          // Triggered when initial date input characters break base structural limits
+							else
 							{
-								date[0] = '0'; // Enforce safe structural defaults back into target data cells
-								CmdLCD(CLR); // Blank display fields to allow new error strings presentations
-								CmdLCD(GOTO_L1_POSN0); // Point alignment cursors back at primary interface starting offsets
-								StrLCD((signed char*)"Invalid Date"); // Inform user that date entries fall completely out of bounds
-								CmdLCD(GOTO_L2_POSN0); // Move text generation targets down onto lower tracking structures
-								StrLCD((signed char*)"Try Again"); // Render contextual interface retry messages inside line grids
-								delay_ms(100); // Suspend computing updates across brief diagnostic timing windows
-								goto i;     // Route background processing logic straight back up onto label i
+								date[0] = '0'; // Reset first date digit
+								CmdLCD(CLR); // Clear LCD
+								CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+								StrLCD((signed char*)"Invalid Date"); // Display invalid date
+								CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+								StrLCD((signed char*)"Try Again"); // Display try again
+								delay_ms(100); // Wait
+								goto i;     // Enter date again
 							}
-							break;        // Terminate individual date day modifications paths cleanly via breaks
+							break;
 						
 						// month
-						case '2':       // Branch path handling month configurations transformations within systems
-						j: CmdLCD(CLR);  // Command active viewing devices to drop current text layout maps
-							CmdLCD(GOTO_L1_POSN0); // Relocate baseline writing targets up onto row number one origins
-							StrLCD((signed char*)date); // Draw the current layout template calendar information to panels faces
-							CmdLCD(GOTO_L1_POSN0 + 3); // Position the text tracking cursor straight onto tens month index location
-							date[3] = KeyScan(); // Read matrix button inputs directly into data index string element three
-							CharLCD(date[3]); // Present updated numeric selections directly onto screen grid lines
-							if(date[3] == 'C') // Check for intentional clear overrides entered through keyboard systems
+						case '2':       // Set month
+						j: CmdLCD(CLR);  // Clear LCD
+							CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+							StrLCD((signed char*)date); // Display current date
+							CmdLCD(GOTO_L1_POSN0 + 3); // Move cursor to month position
+							date[3] = KeyScan(); // Read first month digit
+							CharLCD(date[3]); // Display entered digit
+							if(date[3] == 'C') // Check clear key
 							{
-								date[3] = '0'; // Clear out variable indexes back into baseline structural default values
-								goto i;     // Jump background execution tracks far backward back to label entry i
+								date[3] = '0'; // Reset first month digit
+								goto i;     // Enter date again
 							}
-							else if(date[3] >= '0' && date[3] <= '1') // Ensure month tens character matches correct parameters (0-1)
+							else if(date[3] >= '0' && date[3] <= '1') // Check first month digit
 							{
-							month: CmdLCD(CLR); // Refresh interface screen frames by running matrix sweep routines
-								CmdLCD(GOTO_L1_POSN0); // Reset text generation cursors back onto top boundary layers
-								StrLCD((signed char*)date); // Print operational calendar arrays onto character fields grids
-								CmdLCD(GOTO_L1_POSN0 + 4); // Jump cursor points forward to match unit month textual positions
-								date[4] = KeyScan(); // Extract unit month selections parameters directly into index four cells
-								if(date[4] == 'C') // Test user choices to evaluate if a clear override was initiated
+							month: CmdLCD(CLR); // Clear LCD
+								CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+								StrLCD((signed char*)date); // Display current date
+								CmdLCD(GOTO_L1_POSN0 + 4); // Move cursor to second month digit
+								date[4] = KeyScan(); // Read second month digit
+								if(date[4] == 'C') // Check clear key
 								{
-									date[3] = '0'; // Force active tracking indexes back down to default zero strings
-									date[4] = '0'; // Force active tracking indexes back down to default zero strings
-									goto j; // Loop structural systems flow back up to internal label references j
+									date[3] = '0'; // Reset first month digit
+									date[4] = '0'; // Reset second month digit
+									goto j; // Enter month again
 								}
 								else if((date[3] == '0' && (date[4] >= '1' && date[4] <= '9')) ||
-									(date[3] == '1' && (date[4] >= '0' && date[4] <= '2'))) // Validate month values (01-12)
+									(date[3] == '1' && (date[4] >= '0' && date[4] <= '2'))) // Check valid month
 								{
-									CharLCD(date[1]); // Render dynamic symbol elements directly into current layout blocks
-									SetRTCDateInfo(date); // Save valid date configurations into physical background hardware chips
+									CharLCD(date[1]); // Display digit
+									SetRTCDateInfo(date); // Update RTC date
 								}
-								else        // Execute fallback operations if the composite month parameters break bounds
+								else
 								{
-									date[4] = '0'; // Overwrite invalid components back into clean structural placeholders
-									CmdLCD(CLR); // Clear display rows before presenting explicit boundary error readouts
-									CmdLCD(GOTO_L1_POSN0); // Relocate dynamic focus targets back onto top row fields line
-									StrLCD((signed char*)"Invalid month"); // Output clear diagnostic notifications describing boundary failures
-									CmdLCD(GOTO_L2_POSN0); // Step text cursors down onto lower utility row zones
-									StrLCD((signed char*)"Try Again"); // Frame basic re-entry instructions down inside layout boxes
-									delay_ms(100); // Suspend foreground compute routines across brief delay periods
-									goto month; // Transfer execution pathways back down to localized sub-menus labels
+									date[4] = '0'; // Reset second month digit
+									CmdLCD(CLR); // Clear LCD
+									CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+									StrLCD((signed char*)"Invalid month"); // Display invalid month
+									CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+									StrLCD((signed char*)"Try Again"); // Display try again
+									delay_ms(100); // Wait
+									goto month; // Enter second month digit again
 								}
 							}
-							else          // Triggered when initial month selections violate design definitions completely
+							else
 							{
-								date[3] = '0'; // Revert un-validated parameter variables back into safe string conditions
-								CmdLCD(CLR); // Throw general matrix wipe codes out through communications interfaces
-								CmdLCD(GOTO_L1_POSN0); // Re-align printing pointers back up with top line starting grids
-								StrLCD((signed char*)"Invalid month"); // Report range failures back down across liquid crystal screen tracks
-								CmdLCD(GOTO_L2_POSN0); // Drop focus targets down onto baseline secondary screen layers
-								StrLCD((signed char*)"Try Again"); // Re-render interactive instructions urging operational retries
-								delay_ms(100); // Stall processing paths to ensure error strings are fully legible
-								goto j;     // Jump system flow tracks back up to structural entry point j
+								date[3] = '0'; // Reset first month digit
+								CmdLCD(CLR); // Clear LCD
+								CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+								StrLCD((signed char*)"Invalid month"); // Display invalid month
+								CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+								StrLCD((signed char*)"Try Again"); // Display try again
+								delay_ms(100); // Wait
+								goto j;     // Enter month again
 							}
-							break;        // Drop out from active month adjustments sub-cases completely via breaks
+							break;
 						
 						// year
-						case '3':       // Branch node handling numerical 4-digit calendar year value modifications
-						k: CmdLCD(CLR);  // Clear dynamic panel viewing fields to configure clean data entry modes
-							StrLCD((signed char*)"Year(0-4095):"); // Output textual constraint guidelines showing allowable ranges
-							CmdLCD(GOTO_L2_POSN0); // Move layout drawing points down onto secondary row boundaries lines
-
-							// Collect 4 digits and check each one for "numeric only"
-							for(i = 0; i < 4; i++) // Initialize iterative loops to sequentially capture four numbers
+						case '3':       // Set year
+						k: CmdLCD(CLR);  // Clear LCD
+							StrLCD((signed char*)"Year(0-4095):"); // Display year range
+							CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+														// Collect 4 digits and check each one for "numeric only"
+							for(i = 0; i < 4; i++) // Read 4 digits
 							{
-								temp = KeyScan(); // Poll keypad peripheral arrays to secure individual characters inputs
+								temp = KeyScan(); // Read key from keypad
 								
-								// 1. Check if the key is a digit (0-9)
-								if(temp >= '0' && temp <= '9') // Verify inputs match valid mathematical numeric parameters
+								// Check if key is a digit
+								if(temp >= '0' && temp <= '9') // Check numeric key
 								{
-									date[6 + i] = temp; // Store verified numeric items into correct target offset arrays
-									CharLCD(temp);   // Write character symbols down to visual liquid crystal display cells
+									date[6 + i] = temp; // Store digit
+									CharLCD(temp);   // Display digit
 								}
-								// 2. If 'C' is pressed, restart
-								else if(temp == 'C') // Check if users requested to dump entries and fall back
+								// Check clear key
+								else if(temp == 'C')
 								{
-									goto k;         // Loop functional execution paths directly back to label entry k
+									goto k;         // Enter year again
 								}
-								// 3. If anything else is pressed (like +, A, B, #)
-								else                // Catch node treating illegal symbols selections during numeric inputs
+								// Check invalid key
+								else
 								{
-									CmdLCD(CLR);    // Clear interface strings immediately from display panels memory maps
-									StrLCD((signed char*)"Invalid Key!"); // Render quick notifications verifying inputs matched unmapped keys
-									delay_ms(1000); // Stand down computing tracks for a duration spanning one second
-									goto k;         // Force execution routines to return back to loop label k
+									CmdLCD(CLR);    // Clear LCD
+									StrLCD((signed char*)"Invalid Key!"); // Display invalid key
+									delay_ms(1000); // Wait for 1 second
+									goto k;         // Enter year again
 								}
 							}
 
-							// --- After the loop, we have exactly 4 digits ---
+							// Convert 4 digits into year value
 							year_val = ((date[6] - '0') * 1000) + 
 							           ((date[7] - '0') * 100) + 
 							           ((date[8] - '0') * 10) + 
-							           (date[9] - '0'); // Reconstitute raw characters arrays elements into one composite integer value
+							           (date[9] - '0');
 
-							if(year_val > 4095) // Validate composite integer totals fall inside hardware constraints (Max 4095)
+							if(year_val > 4095) // Check maximum year value
 							{
-								CmdLCD(CLR);      // Request absolute visual panels clear actions from local modules
-								StrLCD((signed char*)"Max is 4095!"); // Render textual notification warning of max threshold limits
-								delay_ms(1000);   // Enforce strict one-second wait periods to capture user eye focuses
-								goto k;           // Force loop flow backwards up to localized year initialization blocks
+								CmdLCD(CLR);      // Clear LCD
+								StrLCD((signed char*)"Max is 4095!"); // Display maximum year message
+								delay_ms(1000);   // Wait for 1 second
+								goto k;           // Enter year again
 							}
-							else                // Path chosen when the constructed year integer satisfies design guidelines
+							else
 							{
-								SetRTCDateInfo(date); // Save fully validated calendar configurations to background clock systems
-								StrLCD((signed char*)" - Saved!"); // Render short validation statements showing task success flags
-								delay_ms(1000);   // Pause foreground loops for one second to visually display confirmation
+								SetRTCDateInfo(date); // Set RTC date
+								StrLCD((signed char*)" - Saved!"); // Display saved message
+								delay_ms(1000);   // Wait for 1 second
 							}
-							break;        // Break away from year calculation routines back into main structural layers
-						case '4':       // Sub-menu terminal option choice indicating user configuration escape paths
-							break;        // Drop out from target menu layers switch statements cleanly via breaks
-						default:        // Trapping block parsing entries that fail to match standard numbers codes
-							CmdLCD(CLR);  // Command active visual panels to empty contents from display matrices
-							CmdLCD(GOTO_L1_POSN0); // Move graphic focus indicators up onto start row coordinates line
-							StrLCD((signed char*)"Invalid Input"); // Output general error texts highlighting unexpected system arguments
-							CmdLCD(GOTO_L2_POSN0); // Pull layout writing focuses down onto lower boundary lines tracks
-							StrLCD((signed char*)"Try Again"); // Display instructional terms inviting users to input choices again
-							delay_ms(1000); // Block operational updates across a span tracking full single seconds
-							break;        // Break cleanly out from calendar selections blocks back to parent routines
+							break;
+						case '4':       // Exit date menu
+							break;
+						default:        // Invalid input
+							CmdLCD(CLR);  // Clear LCD
+							CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+							StrLCD((signed char*)"Invalid Input"); // Display invalid input
+							CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+							StrLCD((signed char*)"Try Again"); // Display try again
+							delay_ms(1000); // Wait for 1 second
+							break;
 					}
-					if(key == '4')    // Explicit validation step checking if escape codes are currently flagged
-						break;          // Disregard sub-loops limits and jump straight out of nested structures
+					if(key == '4')    // Check exit key
+						break;
 				}
-				break;              // Escape execution pathways down through outer calendar processing arrays
+				break;
 						
-			case '4':               // Standard exit key match terminating settings changes routines entirely
-				break;              // Break cleanly away from baseline secondary menu structures via breaks
-			default:                // Fallback catch parsing options selections falling outside primary boundaries
-				CmdLCD(CLR);        // Clear visual panels completely to handle invalid option displays safely
-				CmdLCD(GOTO_L1_POSN0); // Shift printing alignments back to upper-left interface markers
-				StrLCD((signed char*)"Invalid Input"); // Write error line explaining chosen keys are unmapped options
-				CmdLCD(GOTO_L2_POSN0); // Drop focus targets onto bottom display rows to finalize feedback
-				StrLCD((signed char*)"Try Again"); // Render simple operational instruction blocks encouraging re-entry
-				delay_ms(1000);     // Hold messaging active across a duration window lasting one full second
-				break;              // Break away from parent operational menu processing statements blocks
+			case '4':               // Exit RTC menu
+				break;
+			default:                // Invalid input
+				CmdLCD(CLR);        // Clear LCD
+				CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+				StrLCD((signed char*)"Invalid Input"); // Display invalid input
+				CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+				StrLCD((signed char*)"Try Again"); // Display try again
+				delay_ms(1000);     // Wait for 1 second
+				break;
 		}
-		if(key == '4')              // Explicit structural check tracking system exit conditions parameters inside states
-			break;                  // Terminate master secondary interface configurations tracking loops completely
+		if(key == '4')              // Check exit key
+			break;
 	}
 }
 
-void configure(void)            // Implement primary system setup routine managing overall reminders configurations parameters
+void configure(void)            // Main configuration menu
 {
-	flag = 0;                     // Reset system activation request flags back down to operational baseline zero
-	while(1)                      // Establish infinite master tracking loop handling primary settings selection screens
+	flag = 0;                     // Reset flag
+	while(1)                      // Repeat configuration menu
 	{
 		/*menu-1
 		1.time,date,day editing
 		2.New Entry or update medicine details and Remainders
 		3.exit menu and display real time clock*/
-		CmdLCD(CLR);                // Command LCD screen controllers to clear dynamic buffers from display lines
-		CmdLCD(GOTO_L1_POSN0);      // Lock layout focus positions back onto origin elements of first text lines
-		StrLCD((signed char*)"1.RTC Edit 3.Q"); // Write out options labels for master level selections paths layout
-		CmdLCD(GOTO_L2_POSN0);      // Drop dynamic cursor focus alignments onto secondary terminal display lines
-		StrLCD((signed char*)"2.Medicine Edit"); // Draw secondary structural text parameters across the screen layout width
-		key = KeyScan();            // Poll physical keypad networks to catch initial navigation commands choice
-		// Based on key value run the process
+		CmdLCD(CLR);                // Clear LCD
+		CmdLCD(GOTO_L1_POSN0);      // Move cursor to first line
+		StrLCD((signed char*)"1.RTC Edit 3.Q"); // Display RTC edit and exit options
+		CmdLCD(GOTO_L2_POSN0);      // Move cursor to second line
+		StrLCD((signed char*)"2.Medicine Edit"); // Display medicine edit option
+		key = KeyScan();            // Read key from keypad
+		// Run process based on key
 		
-		switch(key)                 // Parse inputs values to direct internal processing tracks down user channels
+		switch(key)
 		{
 			/*menu 2
 			1.hour,2.min,3.sec,4.day,5.date,6.month,7.year,8.quit*/
-			case '1':                 // Option selector branch linking users directly to real clock tracking changes
-				menu2();                // Invoke system secondary configurations sub-menus to adjust RTC metrics
-				break;                  // Drop system flow straight out from active selections switch matrices
+			case '1':                 // RTC edit option
+				menu2();                // Open RTC edit menu
+				break;
 			
 			/*menu 3
 			1.1st medicine details 2.2nd medicine details 3.3rd medicine details*/
-			case '2':                 // Option selector branch routing users to updates medicine alert definitions
-				while(1)              // Initialize looping structures to choose which reminder indices to update
+			case '2':                 // Medicine edit option
+				while(1)
 				{
-					CmdLCD(CLR);        // Clear data characters completely from text rows before printing fresh choices
-					CmdLCD(GOTO_L1_POSN0); // Bring visual display pointer targets back up onto line number one margins
-					StrLCD((signed char*)"1.Med1 3.Med3"); // Print labels linking specific choices keys to explicit medicine tags
-					CmdLCD(GOTO_L2_POSN0); // Step layout creation focus indices down onto lower displaying sectors
-					StrLCD((signed char*)"2.Med2 4.Exit"); // Render secondary blocks options allowing quick systems menu exits
-					key = KeyScan();    // Scan peripheral keyboard arrays to pull active reminder target items
-					switch(key)         // Navigate internal flow channels based on targeted medicine records chosen
+					CmdLCD(CLR);        // Clear LCD
+					CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+					StrLCD((signed char*)"1.Med1 3.Med3"); // Display medicine 1 and 3 options
+					CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+					StrLCD((signed char*)"2.Med2 4.Exit"); // Display medicine 2 and exit options
+					key = KeyScan();    // Read key from keypad
+					switch(key)
 					{
 						// for medicine 1
-						case '1':         // Branch routine configuring runtime hours and minutes for Reminder Block 1
-							while(1)      // Initialize persistent configurations adjustment sub-loops for Medicine 1
+						case '1':         // Edit medicine 1 time
+							while(1)
 							{
-								CmdLCD(CLR); // Request active displaying panels to strip text parameters off grids
-								CmdLCD(GOTO_L1_POSN0); // Target row alignment focus back onto top boundary start locations
-								StrLCD((signed char*)m1); // Render active text strings tracking settings for Reminder 1
-								CmdLCD(GOTO_L2_POSN0); // Shift text generation targets onto lower tracking structure layers
-								StrLCD((signed char*)"1.hr 2.min 3.Q"); // Present specific component adjustment options items back to user
-								key = KeyScan(); // Catch target matrix inputs data characters from local systems
-								switch(key) // Parse component inputs flags to split processing tracks down choices paths
+								CmdLCD(CLR); // Clear LCD
+								CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+								StrLCD((signed char*)m1); // Display medicine 1 time
+								CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+								StrLCD((signed char*)"1.hr 2.min 3.Q"); // Display edit options
+								key = KeyScan(); // Read key from keypad
+								switch(key)
 								{
 									// for hour set
-									case '1': // Target sub-branch assigned to configure reminder hour variables
-									a: CmdLCD(CLR); // Wipe active liquid crystal rendering screens completely from visibility
-										CmdLCD(GOTO_L1_POSN0); // Snap visualization pointers straight back onto row one base indices
-										StrLCD((signed char*)m1); // Render active tracking templates containing reminder string parameters
-										CmdLCD(GOTO_L1_POSN0); // Re-establish text processing locations back up on line entry thresholds
-										m1[0] = KeyScan(); // Block for single-character digit key matrix selection to insert at offset 0
-										CharLCD(m1[0]); // Draw input characters directly down across hardware visual nodes
-										if(m1[0] == 'C') // Verify if the operator tapped the dedicated clear override character
+									case '1': // Set medicine 1 hour
+									a: CmdLCD(CLR); // Clear LCD
+										CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+										StrLCD((signed char*)m1); // Display medicine 1 time
+										CmdLCD(GOTO_L1_POSN0); // Move cursor to hour position
+										m1[0] = KeyScan(); // Read first hour digit
+										CharLCD(m1[0]); // Display digit
+										if(m1[0] == 'C') // Check clear key
 										{
-											m1[0] = '0'; // Revert top layer cell index mapping back to clean base character
-											goto a; // Loop workflow operations down into local fallback timing labels
+											m1[0] = '0'; // Reset first hour digit
+											goto a; // Enter hour again
 										}
-										else if(m1[0] >= '0' && m1[0] <= '2') // Validate that hours first numeric index fits time limits (0-2)
+										else if(m1[0] >= '0' && m1[0] <= '2') // Check first hour digit
 										{
-										m1h: CmdLCD(CLR); // Clean visual interface displays by pushing clear messages out
-											CmdLCD(GOTO_L1_POSN0); // Recenter text printing bounds back onto main row paths boundary
-											StrLCD((signed char*)m1); // Render layout formatting templates matching ongoing adjustments strings
-											CmdLCD(GOTO_L1_POSN0 + 1); // Step text processing locations directly onto unit hours index slots
-											m1[1] = KeyScan(); // Extract unit hours selection parameters directly into index one cells
-											if(m1[1] == 'C') // Test user choices to evaluate if a clear override was initiated
+										m1h: CmdLCD(CLR); // Clear LCD
+											CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+											StrLCD((signed char*)m1); // Display medicine 1 time
+											CmdLCD(GOTO_L1_POSN0 + 1); // Move cursor to second hour digit
+											m1[1] = KeyScan(); // Read second hour digit
+											if(m1[1] == 'C') // Check clear key
 											{
-												m1[0] = '0'; // Overwrite invalid components back into clean structural placeholders
-												m1[1] = '0'; // Overwrite invalid components back into clean structural placeholders
-												goto a; // Branch control execution tracks back to the primary hours label baseline
+												m1[0] = '0'; // Reset first hour digit
+												m1[1] = '0'; // Reset second hour digit
+												goto a; // Enter hour again
 											}
 											else if(((m1[0] >= '0' && m1[0] <= '1') && (m1[1] >= '0' && m1[1] <= '9'))
-												|| (m1[0] == '2' && (m1[1] >= '0') && (m1[1] <= '3'))) // Check for valid hours boundaries (00-23)
+												|| (m1[0] == '2' && (m1[1] >= '0') && (m1[1] <= '3'))) // Check valid hour
 											{
-												CharLCD(m1[1]); // Render valid chosen symbol entry directly into display view line locations
+												CharLCD(m1[1]); // Display second hour digit
 											}
-											else  // Handle error responses if the inputted digit fails numerical ranges
+											else
 											{
-												m1[1] = '0'; // Enforce safe baseline default symbols down inside memory matrices
-												CmdLCD(CLR); // Direct display hardware modules to drop current layout structures
-												CmdLCD(GOTO_L1_POSN0); // Move graphic rendering references back up onto baseline boundaries
-												StrLCD((signed char*)"Invalid Hour"); // Output contextual notifications describing execution constraint issues
-												CmdLCD(GOTO_L2_POSN0); // Step cursor markers down onto lower text track layers
-												StrLCD((signed char*)"Try Again"); // Prompt interface re-tries by placing system display strings
-												delay_ms(100); // Stall standard computing tracks across short millisecond gaps
-												goto m1h; // Loop system execution pointers backward back up onto primary element label entry
+												m1[1] = '0'; // Reset second hour digit
+												CmdLCD(CLR); // Clear LCD
+												CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+												StrLCD((signed char*)"Invalid Hour"); // Display invalid hour
+												CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+												StrLCD((signed char*)"Try Again"); // Display try again
+												delay_ms(100); // Wait
+												goto m1h; // Enter second hour digit again
 											}
 										}
-										else    // Fallback tracking block triggered when the initial hour character fails tests
+										else
 										{
-											m1[0] = '0'; // Revert top layer cell index mapping back to clean base character
-											CmdLCD(CLR); // Clear active viewing screen cells to handle error updates cleanly
-											CmdLCD(GOTO_L1_POSN0); // Re-establish graphic printing bounds parameters at origin marker points
-											StrLCD((signed char*)"Invalid Hour"); // Display notice stating primary data choices failed validation bounds
-											CmdLCD(GOTO_L2_POSN0); // Drop graphic cursor focus paths down to next character track lines
-											StrLCD((signed char*)"Try Again"); // Present operational retry text blocks back to user view spaces
-											delay_ms(100); // Stall dynamic calculation execution tracks briefly for sensory visibility
-											goto a; // Branch control flow tracks directly back to target marker label a
+											m1[0] = '0'; // Reset first hour digit
+											CmdLCD(CLR); // Clear LCD
+											CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+											StrLCD((signed char*)"Invalid Hour"); // Display invalid hour
+											CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+											StrLCD((signed char*)"Try Again"); // Display try again
+											delay_ms(100); // Wait
+											goto a; // Enter hour again
 										}	
-										break;  // Break outward from hour case routine paths back into main tracking structures
+										break;
 
 									// for min set
-									case '2': // Target sub-branch assigned to configure reminder minute variables
-									b: CmdLCD(CLR); // Reset display screen elements by pushing a clear message down to registers
-										CmdLCD(GOTO_L1_POSN0); // Establish target display field alignment coordinates back to Row 1 start
-										StrLCD((signed char*)m1); // Display reminder variable data structures across the character pane surface
-										CmdLCD(GOTO_L1_POSN0 + 3); // Advance focus alignment forward across the text array onto tens minute index
-										m1[3] = KeyScan(); // Capture target matrix index value selection to record at offset three
-										CharLCD(m1[3]); // Display standard numeric symbol mapping character values down to LCD grids
-										if(m1[3] == 'C') // Test array strings to determine if an abort command request was given
+									case '2': // Set medicine 1 minute
+									b: CmdLCD(CLR); // Clear LCD
+										CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+										StrLCD((signed char*)m1); // Display medicine 1 time
+										CmdLCD(GOTO_L1_POSN0 + 3); // Move cursor to first minute digit
+										m1[3] = KeyScan(); // Read first minute digit
+										CharLCD(m1[3]); // Display digit
+										if(m1[3] == 'C') // Check clear key
 										{
-											m1[3] = '0'; // Revert target element memory register states back to base character zero
-											goto b; // Re-route processing logic flow tracks backward onto loop entry label b
+											m1[3] = '0'; // Reset first minute digit
+											goto b; // Enter minute again
 										}
-										else if(m1[3] >= '0' && m1[3] <= '5') // Verify the tens character fits standard hexagesimal scales (0-5)
+										else if(m1[3] >= '0' && m1[3] <= '5') // Check first minute digit
 										{
-										m1m: CmdLCD(CLR); // Clean the active system displaying elements framework back to base states
-											CmdLCD(GOTO_L1_POSN0); // Relocate textual view cursor alignment locations back to the row origin
-											StrLCD((signed char*)m1); // Reprint the underlying reminder layout contents to dynamic panel fields
-											CmdLCD(GOTO_L1_POSN0 + 4); // Step cursor forward four blocks to target structural unit minute position
-											m1[4] = KeyScan(); // Read explicit key element assignment data mapping directly into offset four
-											if(m1[4] == 'C') // Evaluate if user intends to fall back and purge local parameters
+										m1m: CmdLCD(CLR); // Clear LCD
+											CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+											StrLCD((signed char*)m1); // Display medicine 1 time
+											CmdLCD(GOTO_L1_POSN0 + 4); // Move cursor to second minute digit
+											m1[4] = KeyScan(); // Read second minute digit
+											if(m1[4] == 'C') // Check clear key
 											{
-												m1[3] = '0'; // Restore context column tracking index data values back to baseline
-												m1[4] = '0'; // Clear out unit slot structure fields back to structural baseline
-												goto b; // Re-align loop pointers back to primary branch parameter label markers
+												m1[3] = '0'; // Reset first minute digit
+												m1[4] = '0'; // Reset second minute digit
+												goto b; // Enter minute again
 											}
-											else if(m1[4] >= '0' && m1[4] <= '9') // Confirm that unit digit inputs reside cleanly inside numerical values
+											else if(m1[4] >= '0' && m1[4] <= '9') // Check second minute digit
 											{
-												CharLCD(m1[4]); // Draw single character unit digit onto display structure array blocks
+												CharLCD(m1[4]); // Display second minute digit
 											}
-											else  // Handle error responses if the inputted digit fails numerical ranges
+											else
 											{
-												m1[4] = '0'; // Enforce fallback data definitions down onto active parameters cells
-												CmdLCD(CLR); // Refresh displaying interfaces by throwing structural wipe controls down
-												CmdLCD(GOTO_L1_POSN0); // Re-establish text processing locations back up on line entry thresholds
-												StrLCD((signed char*)"Invalid Minute"); // Render confirmation alert string details indicating boundary error
-												CmdLCD(GOTO_L2_POSN0); // Move graphic focus indicators down onto secondary row frameworks
-												StrLCD((signed char*)"Try Again"); // Encourage interactive user retries by populating layout prompts
-												delay_ms(100); // Block operation steps briefly to make data updates visual to eyes
-												goto m1m; // Loop workflow operations down into local fallback minute logic paths
+												m1[4] = '0'; // Reset second minute digit
+												CmdLCD(CLR); // Clear LCD
+												CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+												StrLCD((signed char*)"Invalid Minute"); // Display invalid minute
+												CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+												StrLCD((signed char*)"Try Again"); // Display try again
+												delay_ms(100); // Wait
+												goto m1m; // Enter second minute digit again
 											}
 										}
-										else    // Triggered when initial minute values exceed maximum timing definitions
+										else
 										{
-											m1[3] = '0'; // Set index memory location contents straight back to reliable zero base
-											CmdLCD(CLR); // Flash clear command updates across character displaying module blocks
-											CmdLCD(GOTO_L1_POSN0); // Align tracking focus limits back up with main line text fields
-											StrLCD((signed char*)"Invalid Minute"); // Alert operators concerning incorrect minutes input structural constraints
-											CmdLCD(GOTO_L2_POSN0); // Drop writing coordinates down onto secondary interface layer regions
-											StrLCD((signed char*)"Try Again"); // Present structural user retry options down onto layout grids
-											delay_ms(100); // Hold operational flow tracking suspended across short tracking gaps
-											goto b; // Loop operational configurations direct to step marker label reference b
+											m1[3] = '0'; // Reset first minute digit
+											CmdLCD(CLR); // Clear LCD
+											CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+											StrLCD((signed char*)"Invalid Minute"); // Display invalid minute
+											CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+											StrLCD((signed char*)"Try Again"); // Display try again
+											delay_ms(100); // Wait
+											goto b; // Enter minute again
 										}
-										break;  // Break cleanly out from minute handling cases back into parent structures
+										break;
 									
-									case '3': // User request option mapping directly to dynamic menu exits paths
-										break;  // Break away from individual component modifications switch structures cleanly
+									case '3': // Exit medicine 1 edit
+										break;
 									
-									default:  // Trapping case capturing unassigned keystroke signals safely
-										CmdLCD(CLR); // Request standard display updates to reset visual grids paths
-										CmdLCD(GOTO_L1_POSN0); // Reset textual view coordinates back up onto primary margins
-										StrLCD((signed char*)"Invalid Input"); // Output context error texts validating selection bounds failures
-										CmdLCD(GOTO_L2_POSN0); // Push layout rendering target paths down onto row level two
-										StrLCD((signed char*)"Try Again"); // Display manual instruction strings prompting layout choices re-entry
-										delay_ms(1000); // Freeze system configurations workflows across full single seconds windows
-										break;  // Drop out from current reminder adjustments sub-cases completely
+									default: // Invalid input
+										CmdLCD(CLR); // Clear LCD
+										CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+										StrLCD((signed char*)"Invalid Input"); // Display invalid input
+										CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+										StrLCD((signed char*)"Try Again"); // Display try again
+										delay_ms(1000); // Wait for 1 second
+										break;
 								}
-								if(key == '3') // Check if termination request metrics match active key variables
-									break;      // Escape persistent configuration management tracking loops completely
+								if(key == '3') // Check exit key
+									break;
 							}
-							break;        // Break outward from specific Reminder 1 adjustments paths entirely
+							break;
 
 						// for medicine 2
-						case '2':         // Branch routine configuring runtime hours and minutes for Reminder Block 2
-							while(1)      // Initialize persistent configurations adjustment sub-loops for Medicine 2
-							{
-								CmdLCD(CLR); // Request active displaying panels to strip text parameters off grids
-								CmdLCD(GOTO_L1_POSN0); // Target row alignment focus back onto top boundary start locations
-								StrLCD((signed char*)m2); // Render active text strings tracking settings for Reminder 2
-								CmdLCD(GOTO_L2_POSN0); // Shift text generation targets onto lower tracking structure layers
-								StrLCD((signed char*)"1.hr 2.min 3.Q"); // Present specific component adjustment options items back to user
-								key = KeyScan(); // Catch target matrix inputs data characters from local systems
-								switch(key) // Parse component inputs flags to split processing tracks down choices paths
+						case '2':         // Edit medicine 2 time
+							while(1)
+															{
+								CmdLCD(CLR); // Clear LCD
+								CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+								StrLCD((signed char*)m2); // Display medicine 2 time
+								CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+								StrLCD((signed char*)"1.hr 2.min 3.Q"); // Display edit options
+								key = KeyScan(); // Read key from keypad
+								switch(key)
 								{
 									// for hour set
-									case '1': // Target sub-branch assigned to configure reminder hour variables
-									c: CmdLCD(CLR); // Wipe active liquid crystal rendering screens completely from visibility
-										CmdLCD(GOTO_L1_POSN0); // Snap visualization pointers straight back onto row one base indices
-										StrLCD((signed char*)m2); // Render active tracking templates containing reminder string parameters
-										CmdLCD(GOTO_L1_POSN0); // Re-establish text processing locations back up on line entry thresholds
-										m2[0] = KeyScan(); // Block for single-character digit key matrix selection to insert at offset 0
-										CharLCD(m2[0]); // Draw input characters directly down across hardware visual nodes
-										if(m2[0] == 'C') // Verify if the operator tapped the dedicated clear override character
+									case '1': // Set medicine 2 hour
+									c: CmdLCD(CLR); // Clear LCD
+										CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+										StrLCD((signed char*)m2); // Display medicine 2 time
+										CmdLCD(GOTO_L1_POSN0); // Move cursor to hour position
+										m2[0] = KeyScan(); // Read first hour digit
+										CharLCD(m2[0]); // Display digit
+										if(m2[0] == 'C') // Check clear key
 										{
-											m2[0] = '0'; // Revert top layer cell index mapping back to clean base character
-											goto c; // Loop workflow operations down into local fallback timing labels
+											m2[0] = '0'; // Reset first hour digit
+											goto c; // Enter hour again
 										}
-										else if(m2[0] >= '0' && m2[0] <= '2') // Validate that hours first numeric index fits time limits (0-2)
+										else if(m2[0] >= '0' && m2[0] <= '2') // Check first hour digit
 										{
-										m2h: CmdLCD(CLR); // Clean visual interface displays by pushing clear messages out
-											CmdLCD(GOTO_L1_POSN0); // Recenter text printing bounds back onto main row paths boundary
-											StrLCD((signed char*)m2); // Render layout formatting templates matching ongoing adjustments strings
-											CmdLCD(GOTO_L1_POSN0 + 1); // Step text processing locations directly onto unit hours index slots
-											m2[1] = KeyScan(); // Extract unit hours selection parameters directly into index one cells
-											if(m2[1] == 'C') // Test user choices to evaluate if a clear override was initiated
+										m2h: CmdLCD(CLR); // Clear LCD
+											CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+											StrLCD((signed char*)m2); // Display medicine 2 time
+											CmdLCD(GOTO_L1_POSN0 + 1); // Move cursor to second hour digit
+											m2[1] = KeyScan(); // Read second hour digit
+											if(m2[1] == 'C') // Check clear key
 											{
-												m2[0] = '0'; // Overwrite invalid components back into clean structural placeholders
-												m2[1] = '0'; // Overwrite invalid components back into clean structural placeholders
-												goto c; // Branch control execution tracks back to the primary hours label baseline
+												m2[0] = '0'; // Reset first hour digit
+												m2[1] = '0'; // Reset second hour digit
+												goto c; // Enter hour again
 											}
 											else if(((m2[0] >= '0' && m2[0] <= '1') && (m2[1] >= '0' && m2[1] <= '9'))
-												|| (m2[0] == '2' && (m2[1] >= '0') && (m2[1] <= '3'))) // Check for valid hours boundaries (00-23)
+												|| (m2[0] == '2' && (m2[1] >= '0') && (m2[1] <= '3'))) // Check valid hour
 											{
-												CharLCD(m2[1]); // Render valid chosen symbol entry directly into display view line locations
+												CharLCD(m2[1]); // Display second hour digit
 											}
-											else  // Handle error responses if the inputted digit fails numerical ranges
+											else
 											{
-												m2[1] = '0'; // Enforce safe baseline default symbols down inside memory matrices
-												CmdLCD(CLR); // Direct display hardware modules to drop current layout structures
-												CmdLCD(GOTO_L1_POSN0); // Move graphic rendering references back up onto baseline boundaries
-												StrLCD((signed char*)"Invalid Hour"); // Output contextual notifications describing execution constraint issues
-												CmdLCD(GOTO_L2_POSN0); // Step cursor markers down onto lower text track layers
-												StrLCD((signed char*)"Try Again"); // Prompt interface re-tries by placing system display strings
-												delay_ms(100); // Stall standard computing tracks across short millisecond gaps
-												goto m2h; // Loop system execution pointers backward back up onto primary element label entry
+												m2[1] = '0'; // Reset second hour digit
+												CmdLCD(CLR); // Clear LCD
+												CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+												StrLCD((signed char*)"Invalid Hour"); // Display invalid hour
+												CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+												StrLCD((signed char*)"Try Again"); // Display try again
+												delay_ms(100); // Wait
+												goto m2h; // Enter second hour digit again
 											}
 										}
-										else    // Fallback tracking block triggered when the initial hour character fails tests
+										else
 										{
-											m2[0] = '0'; // Revert top layer cell index mapping back to clean base character
-											CmdLCD(CLR); // Clear active viewing screen cells to handle error updates cleanly
-											CmdLCD(GOTO_L1_POSN0); // Re-establish graphic printing bounds parameters at origin marker points
-											StrLCD((signed char*)"Invalid Hour"); // Display notice stating primary data choices failed validation bounds
-											CmdLCD(GOTO_L2_POSN0); // Drop graphic cursor focus paths down to next character track lines
-											StrLCD((signed char*)"Try Again"); // Present operational retry text blocks back to user view spaces
-											delay_ms(100); // Stall dynamic calculation execution tracks briefly for sensory visibility
-											goto c; // Branch control flow tracks directly back to target marker label c
+											m2[0] = '0'; // Reset first hour digit
+											CmdLCD(CLR); // Clear LCD
+											CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+											StrLCD((signed char*)"Invalid Hour"); // Display invalid hour
+											CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+											StrLCD((signed char*)"Try Again"); // Display try again
+											delay_ms(100); // Wait
+											goto c; // Enter hour again
 										}	
-										break;  // Break outward from hour case routine paths back into main tracking structures
+										break;
 
 									// for min set
-									case '2': // Target sub-branch assigned to configure reminder minute variables
-									d: CmdLCD(CLR); // Reset display screen elements by pushing a clear message down to registers
-										CmdLCD(GOTO_L1_POSN0); // Establish target display field alignment coordinates back to Row 1 start
-										StrLCD((signed char*)m2); // Display reminder variable data structures across the character pane surface
-										CmdLCD(GOTO_L1_POSN0 + 3); // Advance focus alignment forward across the text array onto tens minute index
-										m2[3] = KeyScan(); // Capture target matrix index value selection to record at offset three
-										CharLCD(m2[3]); // Display standard numeric symbol mapping character values down to LCD grids
-										if(m2[3] == 'C') // Test array strings to determine if an abort command request was given
+									case '2': // Set medicine 2 minute
+									d: CmdLCD(CLR); // Clear LCD
+										CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+										StrLCD((signed char*)m2); // Display medicine 2 time
+										CmdLCD(GOTO_L1_POSN0 + 3); // Move cursor to first minute digit
+										m2[3] = KeyScan(); // Read first minute digit
+										CharLCD(m2[3]); // Display digit
+										if(m2[3] == 'C') // Check clear key
 										{
-											m2[3] = '0'; // Revert target element memory register states back to base character zero
-											goto d; // Re-route processing logic flow tracks backward onto loop entry label d
+											m2[3] = '0'; // Reset first minute digit
+											goto d; // Enter minute again
 										}
-										else if(m2[3] >= '0' && m2[3] <= '5') // Verify the tens character fits standard hexagesimal scales (0-5)
+										else if(m2[3] >= '0' && m2[3] <= '5') // Check first minute digit
 										{
-										m2m: CmdLCD(CLR); // Clean the active system displaying elements framework back to base states
-											CmdLCD(GOTO_L1_POSN0); // Relocate textual view cursor alignment locations back to the row origin
-											StrLCD((signed char*)m2); // Reprint the underlying reminder layout contents to dynamic panel fields
-											CmdLCD(GOTO_L1_POSN0 + 4); // Step cursor forward four blocks to target structural unit minute position
-											m2[4] = KeyScan(); // Read explicit key element assignment data mapping directly into offset four
-											if(m2[4] == 'C') // Evaluate if user intends to fall back and purge local parameters
+										m2m: CmdLCD(CLR); // Clear LCD
+											CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+											StrLCD((signed char*)m2); // Display medicine 2 time
+											CmdLCD(GOTO_L1_POSN0 + 4); // Move cursor to second minute digit
+											m2[4] = KeyScan(); // Read second minute digit
+											if(m2[4] == 'C') // Check clear key
 											{
-												m2[3] = '0'; // Restore context column tracking index data values back to baseline
-												m2[4] = '0'; // Clear out unit slot structure fields back to structural baseline
-												goto d; // Re-align loop pointers back to primary branch parameter label markers
+												m2[3] = '0'; // Reset first minute digit
+												m2[4] = '0'; // Reset second minute digit
+												goto d; // Enter minute again
 											}
-											else if(m2[4] >= '0' && m2[4] <= '9') // Confirm that unit digit inputs reside cleanly inside numerical values
+											else if(m2[4] >= '0' && m2[4] <= '9') // Check second minute digit
 											{
-												CharLCD(m2[4]); // Draw single character unit digit onto display structure array blocks
+												CharLCD(m2[4]); // Display second minute digit
 											}
-											else  // Handle error responses if the inputted digit fails numerical ranges
+											else
 											{
-												m2[4] = '0'; // Enforce fallback data definitions down onto active parameters cells
-												CmdLCD(CLR); // Refresh displaying interfaces by throwing structural wipe controls down
-												CmdLCD(GOTO_L1_POSN0); // Re-establish text processing locations back up on line entry thresholds
-												StrLCD((signed char*)"Invalid Minute"); // Render confirmation alert string details indicating boundary error
-												CmdLCD(GOTO_L2_POSN0); // Move graphic focus indicators down onto secondary row frameworks
-												StrLCD((signed char*)"Try Again"); // Encourage interactive user retries by populating layout prompts
-												delay_ms(100); // Block operation steps briefly to make data updates visual to eyes
-												goto m2m; // Loop workflow operations down into local fallback minute logic paths
+												m2[4] = '0'; // Reset second minute digit
+												CmdLCD(CLR); // Clear LCD
+												CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+												StrLCD((signed char*)"Invalid Minute"); // Display invalid minute
+												CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+												StrLCD((signed char*)"Try Again"); // Display try again
+												delay_ms(100); // Wait
+												goto m2m; // Enter second minute digit again
 											}
 										}
-										else    // Triggered when initial minute values exceed maximum timing definitions
+										else
 										{
-											m2[3] = '0'; // Set index memory location contents straight back to reliable zero base
-											CmdLCD(CLR); // Flash clear command updates across character displaying module blocks
-											CmdLCD(GOTO_L1_POSN0); // Align tracking focus limits back up with main line text fields
-											StrLCD((signed char*)"Invalid Minute"); // Alert operators concerning incorrect minutes input structural constraints
-											CmdLCD(GOTO_L2_POSN0); // Drop writing coordinates down onto secondary interface layer regions
-											StrLCD((signed char*)"Try Again"); // Present structural user retry options down onto layout grids
-											delay_ms(100); // Hold operational flow tracking suspended across short tracking gaps
-											goto d; // Loop operational configurations direct to step marker label reference d
+											m2[3] = '0'; // Reset first minute digit
+											CmdLCD(CLR); // Clear LCD
+											CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+											StrLCD((signed char*)"Invalid Minute"); // Display invalid minute
+											CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+											StrLCD((signed char*)"Try Again"); // Display try again
+											delay_ms(100); // Wait
+											goto d; // Enter minute again
 										}
-										break;  // Break cleanly out from minute handling cases back into parent structures
+										break;
 									
-									case '3': // User request option mapping directly to dynamic menu exits paths
-										break;  // Break away from individual component modifications switch structures cleanly
+									case '3': // Exit medicine 2 edit
+										break;
 									
-									default:  // Trapping case capturing unassigned keystroke signals safely
-										CmdLCD(CLR); // Request standard display updates to reset visual grids paths
-										CmdLCD(GOTO_L1_POSN0); // Reset textual view coordinates back up onto primary margins
-										StrLCD((signed char*)"Invalid Input"); // Output context error texts validating selection bounds failures
-										CmdLCD(GOTO_L2_POSN0); // Push layout rendering target paths down onto row level two
-										StrLCD((signed char*)"Try Again"); // Display manual instruction strings prompting layout choices re-entry
-										delay_ms(1000); // Freeze system configurations workflows across full single seconds windows
-										break;  // Drop out from current reminder adjustments sub-cases completely
+									default: // Invalid input
+										CmdLCD(CLR); // Clear LCD
+										CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+										StrLCD((signed char*)"Invalid Input"); // Display invalid input
+										CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+										StrLCD((signed char*)"Try Again"); // Display try again
+										delay_ms(1000); // Wait for 1 second
+										break;
 								}
-								if(key == '3') // Check if termination request metrics match active key variables
-									break;      // Escape persistent configuration management tracking loops completely
+								if(key == '3') // Check exit key
+									break;
 							}
-							break;        // Break outward from specific Reminder 2 adjustments paths entirely
+							break;
 
 						// for medicine 3
-						case '3':         // Branch routine configuring runtime hours and minutes for Reminder Block 3
-							while(1)      // Initialize persistent configurations adjustment sub-loops for Medicine 3
+						case '3': // Edit medicine 3 time
+							while(1)
 							{
-								CmdLCD(CLR); // Request active displaying panels to strip text parameters off grids
-								CmdLCD(GOTO_L1_POSN0); // Target row alignment focus back onto top boundary start locations
-								StrLCD((signed char*)m3); // Render active text strings tracking settings for Reminder 3
-								CmdLCD(GOTO_L2_POSN0); // Shift text generation targets onto lower tracking structure layers
-								StrLCD((signed char*)"1.hr 2.min 3.Q"); // Present specific component adjustment options items back to user
-								key = KeyScan(); // Catch target matrix inputs data characters from local systems
-								switch(key) // Parse component inputs flags to split processing tracks down choices paths
+								CmdLCD(CLR); // Clear LCD
+								CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+								StrLCD((signed char*)m3); // Display medicine 3 time
+								CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+								StrLCD((signed char*)"1.hr 2.min 3.Q"); // Display edit options
+								key = KeyScan(); // Read key from keypad
+								switch(key)
 								{
 									// for hour set
-									case '1': // Target sub-branch assigned to configure reminder hour variables
-									e: CmdLCD(CLR); // Wipe active liquid crystal rendering screens completely from visibility
-										CmdLCD(GOTO_L1_POSN0); // Snap visualization pointers straight back onto row one base indices
-										StrLCD((signed char*)m3); // Render active tracking templates containing reminder string parameters
-										CmdLCD(GOTO_L1_POSN0); // Re-establish text processing locations back up on line entry thresholds
-										m3[0] = KeyScan(); // Block for single-character digit key matrix selection to insert at offset 0
-										CharLCD(m3[0]); // Draw input characters directly down across hardware visual nodes
-										if(m3[0] == 'C') // Verify if the operator tapped the dedicated clear override character
+									case '1': // Set medicine 3 hour
+									e: CmdLCD(CLR); // Clear LCD
+										CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+										StrLCD((signed char*)m3); // Display medicine 3 time
+										CmdLCD(GOTO_L1_POSN0); // Move cursor to hour position
+										m3[0] = KeyScan(); // Read first hour digit
+										CharLCD(m3[0]); // Display digit
+										if(m3[0] == 'C') // Check clear key
 										{
-											m3[0] = '0'; // Revert top layer cell index mapping back to clean base character
-											goto e; // Loop workflow operations down into local fallback timing labels
+											m3[0] = '0'; // Reset first hour digit
+											goto e; // Enter hour again
 										}
-										else if(m3[0] >= '0' && m3[0] <= '2') // Validate that hours first numeric index fits time limits (0-2)
+										else if(m3[0] >= '0' && m3[0] <= '2') // Check first hour digit
 										{
-										m3h: CmdLCD(CLR); // Clean visual interface displays by pushing clear messages out
-											CmdLCD(GOTO_L1_POSN0); // Recenter text printing bounds back onto main row paths boundary
-											StrLCD((signed char*)m3); // Render layout formatting templates matching ongoing adjustments strings
-											CmdLCD(GOTO_L1_POSN0 + 1); // Step text processing locations directly onto unit hours index slots
-											m3[1] = KeyScan(); // Extract unit hours selection parameters directly into index one cells
-											if(m3[1] == 'C') // Test user choices to evaluate if a clear override was initiated
+										m3h: CmdLCD(CLR); // Clear LCD
+											CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+											StrLCD((signed char*)m3); // Display medicine 3 time
+											CmdLCD(GOTO_L1_POSN0 + 1); // Move cursor to second hour digit
+											m3[1] = KeyScan(); // Read second hour digit
+											if(m3[1] == 'C') // Check clear key
 											{
-												m3[0] = '0'; // Overwrite invalid components back into clean structural placeholders
-												m3[1] = '0'; // Overwrite invalid components back into clean structural placeholders
-												goto e; // Branch control execution tracks back to the primary hours label baseline
+												m3[0] = '0'; // Reset first hour digit
+												m3[1] = '0'; // Reset second hour digit
+												goto e; // Enter hour again
 											}
 											else if(((m3[0] >= '0' && m3[0] <= '1') && (m3[1] >= '0' && m3[1] <= '9'))
-												|| (m3[0] == '2' && (m3[1] >= '0') && (m3[1] <= '3'))) // Check for valid hours boundaries (00-23)
+												|| (m3[0] == '2' && (m3[1] >= '0') && (m3[1] <= '3'))) // Check valid hour
 											{
-												CharLCD(m3[1]); // Render valid chosen symbol entry directly into display view line locations
+												CharLCD(m3[1]); // Display second hour digit
 											}
-											else  // Handle error responses if the inputted digit fails numerical ranges
+											else
 											{
-												m3[1] = '0'; // Enforce safe baseline default symbols down inside memory matrices
-												CmdLCD(CLR); // Direct display hardware modules to drop current layout structures
-												CmdLCD(GOTO_L1_POSN0); // Move graphic rendering references back up onto baseline boundaries
-												StrLCD((signed char*)"Invalid Hour"); // Output contextual notifications describing execution constraint issues
-												CmdLCD(GOTO_L2_POSN0); // Step cursor markers down onto lower text track layers
-												StrLCD((signed char*)"Try again"); // Prompt interface re-tries by placing system display strings
-												delay_ms(100); // Stall standard computing tracks across short millisecond gaps
-												goto m3h; // Loop system execution pointers backward back up onto primary element label entry
+												m3[1] = '0'; // Reset second hour digit
+												CmdLCD(CLR); // Clear LCD
+												CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+												StrLCD((signed char*)"Invalid Hour"); // Display invalid hour
+												CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+												StrLCD((signed char*)"Try again"); // Display try again
+												delay_ms(100); // Wait
+												goto m3h; // Enter second hour digit again
 											}
 										}
-										else    // Fallback tracking block triggered when the initial hour character fails tests
+										else
 										{
-											m3[0] = '0'; // Revert top layer cell index mapping back to clean base character
-											CmdLCD(CLR); // Clear active viewing screen cells to handle error updates cleanly
-											CmdLCD(GOTO_L1_POSN0); // Re-establish graphic printing bounds parameters at origin marker points
-											StrLCD((signed char*)"Invalid Hour"); // Display notice stating primary data choices failed validation bounds
-											CmdLCD(GOTO_L2_POSN0); // Drop graphic cursor focus paths down to next character track lines
-											StrLCD((signed char*)"Try again"); // Present operational retry text blocks back to user view spaces
-											delay_ms(100); // Stall dynamic calculation execution tracks briefly for sensory visibility
-											goto e; // Branch control flow tracks directly back to target marker label e
+											m3[0] = '0'; // Reset first hour digit
+											CmdLCD(CLR); // Clear LCD
+											CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+											StrLCD((signed char*)"Invalid Hour"); // Display invalid hour
+											CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+											StrLCD((signed char*)"Try again"); // Display try again
+											delay_ms(100); // Wait
+											goto e; // Enter hour again
 										}	
-										break;  // Break outward from hour case routine paths back into main tracking structures
+										break;
 
 									// for min set
-									case '2': // Target sub-branch assigned to configure reminder minute variables
-									f: CmdLCD(CLR); // Reset display screen elements by pushing a clear message down to registers
-										CmdLCD(GOTO_L1_POSN0); // Establish target display field alignment coordinates back to Row 1 start
-										StrLCD((signed char*)m3); // Display reminder variable data structures across the character pane surface
-										CmdLCD(GOTO_L1_POSN0 + 3); // Advance focus alignment forward across the text array onto tens minute index
-										m3[3] = KeyScan(); // Capture target matrix index value selection to record at offset three
-										CharLCD(m3[3]); // Display standard numeric symbol mapping character values down to LCD grids
-										if(m3[3] == 'C') // Test array strings to determine if an abort command request was given
+									case '2': // Set medicine 3 minute
+									f: CmdLCD(CLR); // Clear LCD
+										CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+										StrLCD((signed char*)m3); // Display medicine 3 time
+										CmdLCD(GOTO_L1_POSN0 + 3); // Move cursor to first minute digit
+										m3[3] = KeyScan(); // Read first minute digit
+										CharLCD(m3[3]); // Display digit
+										if(m3[3] == 'C') // Check clear key
 										{
-											m3[3] = '0'; // Revert target element memory register states back to base character zero
-											goto f; // Re-route processing logic flow tracks backward onto loop entry label f
+											m3[3] = '0'; // Reset first minute digit
+											goto f; // Enter minute again
 										}
-										else if(m3[3] >= '0' && m3[3] <= '5') // Verify the tens character fits standard hexagesimal scales (0-5)
+										else if(m3[3] >= '0' && m3[3] <= '5') // Check first minute digit
 										{
-										m3m: CmdLCD(CLR); // Clean the active system displaying elements framework back to base states
-											CmdLCD(GOTO_L1_POSN0); // Relocate textual view cursor alignment locations back to the row origin
-											StrLCD((signed char*)m3); // Reprint the underlying reminder layout contents to dynamic panel fields
-											CmdLCD(GOTO_L1_POSN0 + 4); // Step cursor forward four blocks to target structural unit minute position
-											m3[4] = KeyScan(); // Read explicit key element assignment data mapping directly into offset four
-											if(m3[4] == 'C') // Evaluate if user intends to fall back and purge local parameters
+										m3m: CmdLCD(CLR); // Clear LCD
+											CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+											StrLCD((signed char*)m3); // Display medicine 3 time
+											CmdLCD(GOTO_L1_POSN0 + 4); // Move cursor to second minute digit
+											m3[4] = KeyScan(); // Read second minute digit
+											if(m3[4] == 'C') // Check clear key
 											{
-												m3[3] = '0'; // Restore context column tracking index data values back to baseline
-												m3[4] = '0'; // Clear out unit slot structure fields back to structural baseline
-												goto f; // Re-align loop pointers back to primary branch parameter label markers
+												m3[3] = '0'; // Reset first minute digit
+												m3[4] = '0'; // Reset second minute digit
+												goto f; // Enter minute again
 											}
-											else if(m3[4] >= '0' && m3[4] <= '9') // Confirm that unit digit inputs reside cleanly inside numerical values
+											else if(m3[4] >= '0' && m3[4] <= '9') // Check second minute digit
 											{
-												CharLCD(m3[4]); // Draw single character unit digit onto display structure array blocks
+												CharLCD(m3[4]); // Display second minute digit
 											}
-											else  // Handle error responses if the inputted digit fails numerical ranges
+											else  // Check invalid minute
 											{
-												m3[4] = '0'; // Enforce fallback data definitions down onto active parameters cells
-												CmdLCD(CLR); // Refresh displaying interfaces by throwing structural wipe controls down
-												CmdLCD(GOTO_L1_POSN0); // Re-establish text processing locations back up on line entry thresholds
-												StrLCD((signed char*)"Invalid Minute"); // Render confirmation alert string details indicating boundary error
-												CmdLCD(GOTO_L2_POSN0); // Move graphic focus indicators down onto secondary row frameworks
-												StrLCD((signed char*)"Try again"); // Encourage interactive user retries by populating layout prompts
-												delay_ms(100); // Block operation steps briefly to make data updates visual to eyes
-												goto m3m; // Loop workflow operations down into local fallback minute logic paths
+												m3[4] = '0'; // Reset second minute digit
+												CmdLCD(CLR); // Clear LCD
+												CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+												StrLCD((signed char*)"Invalid Minute"); // Display invalid minute
+												CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+												StrLCD((signed char*)"Try again"); // Display try again
+												delay_ms(100); // Wait
+												goto m3m; // Enter second minute digit again
 											}
 										}
-										else    // Triggered when initial minute values exceed maximum timing definitions
+										else
 										{
-											m3[3] = '0'; // Set index memory location contents straight back to reliable zero base
-											CmdLCD(CLR); // Flash clear command updates across character displaying module blocks
-											CmdLCD(GOTO_L1_POSN0); // Align tracking focus limits back up with main line text fields
-											StrLCD((signed char*)"Invalid Minute"); // Alert operators concerning incorrect minutes input structural constraints
-											CmdLCD(GOTO_L2_POSN0); // Drop writing coordinates down onto secondary interface layer regions
-											StrLCD((signed char*)"Try again"); // Present structural user retry options down onto layout grids
-											delay_ms(100); // Hold operational flow tracking suspended across short tracking gaps
-											goto f; // Loop operational configurations direct to step marker label reference f
+											m3[3] = '0'; // Reset first minute digit
+											CmdLCD(CLR); // Clear LCD
+											CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+											StrLCD((signed char*)"Invalid Minute"); // Display invalid minute
+											CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+											StrLCD((signed char*)"Try again"); // Display try again
+											delay_ms(100); // Wait
+											goto f; // Enter minute again
 										}
-										break;  // Break cleanly out from minute handling cases back into parent structures
+										break;
 									
-									case '3': // User request option mapping directly to dynamic menu exits paths
-										break;  // Break away from individual component modifications switch structures cleanly
+									case '3': // Exit medicine 3 edit
+										break;
 									
-									default:  // Trapping case capturing unassigned keystroke signals safely
-										CmdLCD(CLR); // Request standard display updates to reset visual grids paths
-										CmdLCD(GOTO_L1_POSN0); // Reset textual view coordinates back up onto primary margins
-										StrLCD((signed char*)"Invalid Input"); // Output context error texts validating selection bounds failures
-										CmdLCD(GOTO_L2_POSN0); // Push layout rendering target paths down onto row level two
-										StrLCD((signed char*)"Try Again"); // Display manual instruction strings prompting layout choices re-entry
-										delay_ms(1000); // Freeze system configurations workflows across full single seconds windows
-										break;  // Drop out from current reminder adjustments sub-cases completely
+									default: // Invalid input
+										CmdLCD(CLR); // Clear LCD
+										CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+										StrLCD((signed char*)"Invalid Input"); // Display invalid input
+										CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+										StrLCD((signed char*)"Try Again"); // Display try again
+										delay_ms(1000); // Wait for 1 second
+										break;
 								}
-								if(key == '3') // Check if termination request metrics match active key variables
-									break;      // Escape persistent configuration management tracking loops completely
+								if(key == '3') // Check exit key
+									break;
 							}
-							break;        // Break outward from specific Reminder 3 adjustments paths entirely
+							break;
 				
-						case '4':         // Dynamic menu selection mapped directly to exit targets within medicine selection states
-							break;          // Escape out from the active targeted medicine list selection routine
-						default:          // Sub-layer fallback handling unexpected inputs entries safely
-							CmdLCD(CLR);    // Flush visual matrix layers to wipe remnants of previous options strings
-							CmdLCD(GOTO_L1_POSN0); // Lock text processing alignment pointers back onto upper row bounds
-							StrLCD((signed char*)"Invalid Input"); // Write error notices stating selected keys matched no dynamic paths
-							CmdLCD(GOTO_L2_POSN0); // Move lower cursor references onto target interface frames rows
-							StrLCD((signed char*)"Try Again"); // Frame standard prompt lines inviting system retries parameters
-							delay_ms(1000); // Suspend foreground computing across a full single-second timing frame
-							break;          // Drop out from current medicine profile select blocks completely
+						case '4': // Exit medicine menu
+							break;
+						default: // Invalid input
+							CmdLCD(CLR); // Clear LCD
+							CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+							StrLCD((signed char*)"Invalid Input"); // Display invalid input
+							CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+							StrLCD((signed char*)"Try Again"); // Display try again
+							delay_ms(1000); // Wait for 1 second
+							break;
 					}
-					if(key == '4')      // Check if general system configuration exit commands were issued
-						break;            // Drop structural processing loops back to master configurations steps
+					if(key == '4') // Check exit key
+						break;
 				}
-				break;                  // Terminate active operations down medicine adjustments switch paths entirely
+				break;
 		
-			case '3':                   // Global configuration screen escape code index selector mapping
-				break;                  // Break away from top-level system choices arrays completely via breaks
+			case '3': // Exit configuration menu
+				break;
 		
-			default:                    // Baseline catch block processing unhandled inputs keys at global menus states
-				CmdLCD(CLR);            // Erase textual elements across display modules prior to updating data fields
-				CmdLCD(GOTO_L1_POSN0);  // Shift dynamic printing track lines back up to row one margins origin
-				StrLCD((signed char*)"Invalid Input"); // Paint descriptive data strings identifying unexpected character flags
-				CmdLCD(GOTO_L2_POSN0);  // Target bottom row text areas before placing basic navigation help labels
-				StrLCD((signed char*)"Try Again"); // Write simple layout instruction blocks indicating workflow restart conditions
-				delay_ms(1000);         // Stall active operations execution for exactly one full thousand-millisecond block
-				break;                  // Break away from primary configurations tracking menu loops entirely
+			default: // Invalid input
+				CmdLCD(CLR); // Clear LCD
+				CmdLCD(GOTO_L1_POSN0); // Move cursor to first line
+				StrLCD((signed char*)"Invalid Input"); // Display invalid input
+				CmdLCD(GOTO_L2_POSN0); // Move cursor to second line
+				StrLCD((signed char*)"Try Again"); // Display try again
+				delay_ms(1000); // Wait for 1 second
+				break;
 		}
 	
-		if(key == '3')                // Evaluate condition parameters checking if terminal escape flags were captured
-			break;                    // Burst completely out from standard background setup menu systems loops
+		if(key == '3') // Check exit key
+			break;
 	}
 }
+											
