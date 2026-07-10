@@ -126,29 +126,6 @@ The RTC configuration feature allows the user to modify the current system date 
 
 </p>
 
-### RTC Configuration Process
-
-```text
-Press Switch-1
-        │
-        ▼
-EINT0 Interrupt Triggered
-        │
-        ▼
-Display Configuration Menu
-        │
-        ▼
-Select Edit RTC
-        │
-        ▼
-Enter Date and Time
-        │
-        ▼
-Update RTC
-        │
-        ▼
-Return to Normal Mode
-```
 
 ---
 
@@ -162,26 +139,7 @@ The user can configure one or more medicine timings using the **Matrix Keypad**.
 
 </p>
 
-### Medicine Configuration Process
 
-```text
-Press Switch-1
-        │
-        ▼
-Enter Setup Mode
-        │
-        ▼
-Select Medicine Configure
-        │
-        ▼
-Enter Medicine Timing
-        │
-        ▼
-Store Schedule in Memory
-        │
-        ▼
-Return to RTC Monitoring
-```
 
 ---
 
@@ -209,30 +167,6 @@ In this mode:
 Once at least one medicine schedule is configured, the LPC2148 continuously reads the RTC.
 
 The controller performs:
-
-```text
-Read RTC Time
-      │
-      ▼
-Read Stored Medicine Timings
-      │
-      ▼
-Compare Current Time
-      │
-      ▼
-Medicine Time Match?
-      │
-   ┌──┴──┐
-   │     │
-  NO    YES
-   │     │
-   │     ▼
-   │   Trigger Alert
-   │
-   ▼
-Continue Monitoring
-```
-
 ---
 
 # 🔔 Medicine Alert System
@@ -256,37 +190,6 @@ The user confirms medicine intake using **Switch-2**.
 
 Switch-2 is connected to the **EINT1 External Interrupt**.
 
-### Acknowledgment Flow
-
-```text
-Medicine Alert Triggered
-        │
-        ▼
-LCD: "Take Medicine Now"
-        │
-        ▼
-Buzzer ON / OFF Alert
-        │
-        ▼
-Start 1-Minute Timer
-        │
-        ▼
-Switch-2 Pressed?
-       / \
-     YES  NO
-      │    │
-      ▼    ▼
-Stop     Wait Until
-Buzzer   Timeout
-      │    │
-      ▼    ▼
-Clear    Auto Stop
-Alert    Buzzer
-      │    │
-      └─┬──┘
-        ▼
-Return to RTC Monitoring
-```
 
 ---
 
@@ -316,60 +219,7 @@ If the user does **not acknowledge within one minute**:
 
 </p>
 
-```text
-System Start
-     │
-     ▼
-Initialize LPC2148 Peripherals
-     │
-     ├── Initialize RTC
-     ├── Initialize LCD
-     ├── Initialize Keypad
-     ├── Initialize Buzzer
-     ├── Initialize Timer
-     ├── Enable EINT0
-     └── Enable EINT1
-     │
-     ▼
-Read RTC Date & Time
-     │
-     ▼
-Display Time on LCD
-     │
-     ▼
-Medicine Schedule Available?
-       / \
-     NO   YES
-      │     │
-      ▼     ▼
-Clock    Compare RTC Time
-Mode     with Medicine Time
-      │     │
-      │     ▼
-      │   Time Match?
-      │     / \
-      │   NO   YES
-      │    │     │
-      │    │     ▼
-      │    │   Display Alert
-      │    │     │
-      │    │     ▼
-      │    │   Start Buzzer
-      │    │     │
-      │    │     ▼
-      │    │   Start Timer
-      │    │     │
-      │    │     ▼
-      │    │   Check EINT1
-      │    │     │
-      │    │     ▼
-      │    │   Stop Alert
-      │    │
-      └────┴───────────────┐
-                           │
-                           ▼
-                  Continue Monitoring
-```
+
 
 ---
 
