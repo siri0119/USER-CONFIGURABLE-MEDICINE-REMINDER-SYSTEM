@@ -74,7 +74,7 @@ When the scheduled medicine time occurs, the system:
 
 <p align="center">
 
-<img src="gallery/block.png" width="100%">
+<img src="gallery/block.jpg" width="100%">
 
 </p>
 ---
